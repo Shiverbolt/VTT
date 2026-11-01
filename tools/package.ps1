@@ -22,7 +22,8 @@ try {
 
     # The portable VTT.exe is byte-identical to the copy inside the installer.
     $sums = foreach ($f in $setup, "VTT.exe") { "{0}  {1}" -f (Get-FileHash "dist\$f" -Algorithm SHA256).Hash.ToLower(), $f }
-    Set-Content -Path dist\SHA256SUMS.txt -Value $sums -Encoding ascii
+    # LF line endings so `sha256sum -c` works on Linux, macOS and Git Bash too.
+    [IO.File]::WriteAllText((Join-Path $root "dist\SHA256SUMS.txt"), (($sums -join "`n") + "`n"), (New-Object Text.ASCIIEncoding))
     $sums | ForEach-Object { Write-Host $_ }
 }
 finally { Pop-Location }
