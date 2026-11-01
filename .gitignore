@@ -1,2 +1,3 @@
 dist/
 *.pfx
+/VTT-Setup-*.exe
