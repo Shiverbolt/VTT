@@ -14,16 +14,16 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Voice-activated push-to-talk: say a command to hold your push-to-talk key, say another to release it.")]
 [assembly: AssemblyProduct("V.T.T?")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Shiverbolt. MIT License.")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
-[assembly: AssemblyInformationalVersion("1.0.0-beta")]
+[assembly: AssemblyVersion("1.0.0.2")]
+[assembly: AssemblyFileVersion("1.0.0.2")]
+[assembly: AssemblyInformationalVersion("1.0.0-beta.2")]
 
 namespace VTT
 {
     static class AppInfo
     {
         public const string Name = "V.T.T?";
-        public const string Version = "1.0 beta";
+        public const string Version = "1.0 beta 2";
         public const string RepoUrl = "https://github.com/Shiverbolt/VTT";
         public static readonly string DataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VTT");
         public static readonly string SamplesFolder = Path.Combine(DataFolder, "samples");
@@ -69,13 +69,14 @@ namespace VTT
         public string OffPhrases = "over and out, mic off";
         public Keys Key = Keys.F13;
         public int MinConfidence = 60;
-        public double Tolerance = 2.0;
+        public int Sensitivity = 100; // percent of the trained cut-off
         public int AutoOffSeconds = 0;
         public bool Sounds = true;
         public bool FilterSpeech = true;
+        public bool AskDeleteOnExit = true;
         public string InputDevice = "", OutputDevice = ""; // empty = Windows default
 
-        static string FilePath { get { return Path.Combine(AppInfo.DataFolder, "settings.txt"); } }
+        public static string FilePath { get { return Path.Combine(AppInfo.DataFolder, "settings.txt"); } }
 
         public static Settings Load()
         {
@@ -95,7 +96,8 @@ namespace VTT
                         case "off": s.OffPhrases = v; break;
                         case "key": s.Key = (Keys)Enum.Parse(typeof(Keys), v); break;
                         case "confidence": s.MinConfidence = int.Parse(v); break;
-                        case "tolerance": s.Tolerance = double.Parse(v, CultureInfo.InvariantCulture); break;
+                        case "sensitivity": s.Sensitivity = int.Parse(v); break;
+                        case "askonexit": s.AskDeleteOnExit = bool.Parse(v); break;
                         case "autooff": s.AutoOffSeconds = int.Parse(v); break;
                         case "sounds": s.Sounds = bool.Parse(v); break;
                         case "filter": s.FilterSpeech = bool.Parse(v); break;
@@ -115,8 +117,8 @@ namespace VTT
                 Directory.CreateDirectory(AppInfo.DataFolder);
                 File.WriteAllLines(FilePath, new[] {
                     "mode=" + (UseRecordings ? "recordings" : "phrases"), "on=" + OnPhrases, "off=" + OffPhrases,
-                    "key=" + Key, "confidence=" + MinConfidence, "tolerance=" + Tolerance.ToString(CultureInfo.InvariantCulture),
-                    "autooff=" + AutoOffSeconds, "sounds=" + Sounds, "filter=" + FilterSpeech,
+                    "key=" + Key, "confidence=" + MinConfidence, "sensitivity=" + Sensitivity,
+                    "autooff=" + AutoOffSeconds, "sounds=" + Sounds, "filter=" + FilterSpeech, "askonexit=" + AskDeleteOnExit,
                     "input=" + InputDevice, "output=" + OutputDevice });
             }
             catch { }
@@ -133,7 +135,7 @@ namespace VTT
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
 
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
             bool first;
             using (var single = new Mutex(true, "VTT-voice-push-to-talk", out first))
@@ -146,7 +148,8 @@ namespace VTT
                 try { SetProcessDPIAware(); } catch { }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new MainForm());
+                // --tray starts hidden in the system tray (used by "Start with Windows").
+                Application.Run(new MainForm(args.Contains("--tray")));
             }
         }
     }

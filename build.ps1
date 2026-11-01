@@ -5,7 +5,7 @@ Push-Location $PSScriptRoot
 try {
     if (-not (Test-Path assets\vtt.ico)) { & .\tools\make-icon.ps1 }
     New-Item -ItemType Directory -Force dist | Out-Null
-    & "$fw\csc.exe" /nologo /target:winexe /optimize /out:dist\VTT.exe /win32icon:assets\vtt.ico `
+    & "$fw\csc.exe" /nologo /codepage:65001 /target:winexe /optimize /out:dist\VTT.exe /win32icon:assets\vtt.ico `
         /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
         /r:"$fw\WPF\System.Speech.dll" src\*.cs
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }

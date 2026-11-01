@@ -332,7 +332,7 @@ namespace VTT
     {
         const int Frame = 160;                     // 10 ms
         const int StartFrames = 4, EndSilenceFrames = 35, PreRollFrames = 25, KeepTailFrames = 10;
-        const int MaxFrames = 350, MinFrames = 25;  // utterances outside 0.25-3.5 s are not commands
+        const int MaxFrames = 600, MinFrames = 25;  // 0.25-6 s; longer stretches are searched for the command
 
         public event Action<short[]> Utterance;
         public event Action SpeechActivity;
@@ -418,10 +418,12 @@ namespace VTT
         }
     }
 
-    // MFCC features (12 cepstra per 10 ms frame, mean-normalised, silence trimmed).
+    // MFCC features per 10 ms frame: 12 mean-normalised cepstra plus their deltas (how they change),
+    // with leading / trailing silence trimmed.
     static class Features
     {
         const int Win = 400, Hop = 160, NFft = 512, NMel = 26, NCep = 12;
+        public const int Dims = NCep * 2;
         static readonly double[] Hamming = Enumerable.Range(0, Win).Select(i => 0.54 - 0.46 * Math.Cos(2 * Math.PI * i / (Win - 1))).ToArray();
         static readonly double[][] MelFilters = BuildMel();
         static readonly double[,] Dct = BuildDct();
@@ -523,7 +525,7 @@ namespace VTT
             var mean = new double[NCep];
             for (int f = 0; f < count; f++)
             {
-                result[f] = new float[NCep];
+                result[f] = new float[Dims];
                 for (int c = 0; c < NCep; c++)
                 {
                     double s = 0;
@@ -534,7 +536,41 @@ namespace VTT
             }
             foreach (var r in result)
                 for (int c = 0; c < NCep; c++) r[c] -= (float)mean[c];
+            for (int f = 0; f < count; f++)
+            {
+                var before = result[Math.Max(0, f - 1)];
+                var after = result[Math.Min(count - 1, f + 1)];
+                for (int c = 0; c < NCep; c++) result[f][NCep + c] = (after[c] - before[c]) * 0.5f;
+            }
             return result;
+        }
+
+        static double FrameDistance(float[] a, float[] b)
+        {
+            double d = 0;
+            for (int c = 0; c < a.Length; c++) { double t = a[c] - b[c]; d += t * t; }
+            return Math.Sqrt(d);
+        }
+
+        // Best match of the whole template anywhere inside a longer utterance (subsequence DTW),
+        // so "uh, mic on" or a command at the end of a sentence still counts.
+        public static double SubsequenceDistance(float[][] utterance, float[][] template)
+        {
+            int n = utterance.Length, m = template.Length;
+            if (m < 5 || n < 5) return double.PositiveInfinity;
+            var prev = new double[n + 1]; // row 0 is free: the match may start anywhere
+            var cur = new double[n + 1];
+            for (int i = 1; i <= m; i++)
+            {
+                cur[0] = double.PositiveInfinity;
+                var ti = template[i - 1];
+                for (int j = 1; j <= n; j++)
+                    cur[j] = FrameDistance(ti, utterance[j - 1]) + Math.Min(prev[j - 1], Math.Min(prev[j], cur[j - 1]));
+                var swap = prev; prev = cur; cur = swap;
+            }
+            double best = double.PositiveInfinity;
+            for (int j = 1; j <= n; j++) best = Math.Min(best, prev[j]);
+            return best / (2 * m);
         }
 
         // Dynamic time warping distance, normalised by path length. Very different lengths never match.
@@ -549,72 +585,102 @@ namespace VTT
             for (int i = 1; i <= n; i++)
             {
                 cur[0] = double.PositiveInfinity;
+                var ai = a[i - 1];
                 for (int j = 1; j <= m; j++)
-                {
-                    double d = 0;
-                    var ai = a[i - 1]; var bj = b[j - 1];
-                    for (int c = 0; c < ai.Length; c++) { double t = ai[c] - bj[c]; d += t * t; }
-                    d = Math.Sqrt(d);
-                    cur[j] = d + Math.Min(prev[j - 1], Math.Min(prev[j], cur[j - 1]));
-                }
+                    cur[j] = FrameDistance(ai, b[j - 1]) + Math.Min(prev[j - 1], Math.Min(prev[j], cur[j - 1]));
                 var swap = prev; prev = cur; cur = swap;
             }
             return prev[m] / (n + m);
         }
     }
 
-    // Holds the recorded samples for each command and decides which one (if any) an utterance matches.
+    // Holds the recorded samples for each command, plus "other speech" samples from the voice trainer,
+    // and decides which command (if any) an utterance matches.
     class VoiceMatcher
     {
-        public const int MaxSamples = 5;
+        public const int MaxSamples = 10, MaxOther = 20;
         public readonly Dictionary<string, List<float[][]>> Templates = new Dictionary<string, List<float[][]>> {
             { "on", new List<float[][]>() }, { "off", new List<float[][]>() }
         };
-        Dictionary<string, double> scale = new Dictionary<string, double>();
+        public readonly List<float[][]> Other = new List<float[][]>();
+        readonly Dictionary<string, double> threshold = new Dictionary<string, double>();
 
+        public bool Ready { get { return threshold.ContainsKey("on") && threshold.ContainsKey("off"); } }
+
+        // Distance from an utterance to a template; a much longer utterance is searched for the template inside it.
+        public static double Dist(float[][] utterance, float[][] template)
+        {
+            return utterance.Length > template.Length * 1.4 ? Features.SubsequenceDistance(utterance, template) : Features.Distance(utterance, template);
+        }
+
+        static double Best(float[][] f, List<float[][]> templates, int skip)
+        {
+            double best = double.PositiveInfinity;
+            for (int i = 0; i < templates.Count; i++)
+                if (i != skip) best = Math.Min(best, Dist(f, templates[i]));
+            return best;
+        }
+
+        // Learns, per command, the distance below which a sound counts as that command: between how close
+        // your repeats are to each other and how close everything else (other speech, the other command) gets.
         public void Recalibrate()
         {
+            threshold.Clear();
             foreach (var cmd in Templates.Keys)
             {
                 var own = Templates[cmd];
-                var dists = new List<double>();
-                for (int i = 0; i < own.Count; i++)
-                    for (int j = i + 1; j < own.Count; j++)
-                    {
-                        double d = Features.Distance(own[i], own[j]);
-                        if (!double.IsInfinity(d)) dists.Add(d);
-                    }
-                if (dists.Count > 0) { scale[cmd] = dists.Average(); continue; }
-                // One sample only: estimate from how far it is from the other command.
-                var cross = new List<double>();
-                foreach (var other in Templates.Where(kv => kv.Key != cmd).SelectMany(kv => kv.Value))
-                    foreach (var t in own)
-                    {
-                        double d = Features.Distance(t, other);
-                        if (!double.IsInfinity(d)) cross.Add(d);
-                    }
-                scale[cmd] = cross.Count > 0 ? cross.Min() * 0.6 : 5;
+                if (own.Count == 0) continue;
+                var pos = new List<double>();
+                if (own.Count >= 2)
+                    for (int i = 0; i < own.Count; i++) pos.Add(Best(own[i], own, i)); // leave-one-out
+                var neg = new List<double>();
+                foreach (var n in Other.Concat(Templates.Where(kv => kv.Key != cmd).SelectMany(kv => kv.Value)))
+                    neg.Add(Best(n, own, -1));
+                double t = PickThreshold(pos.Where(IsFinite).ToList(), neg.Where(IsFinite).ToList());
+                if (IsFinite(t)) threshold[cmd] = t;
             }
         }
 
-        // Score is distance to the closest sample divided by the usual spread between samples
-        // (about 1 for a genuine repeat). Returns "on", "off" or null.
-        public string Match(float[][] f, double tolerance, out double onScore, out double offScore)
+        static bool IsFinite(double d) { return !double.IsInfinity(d) && !double.IsNaN(d); }
+
+        static double PickThreshold(List<double> pos, List<double> neg)
+        {
+            if (pos.Count == 0) return neg.Count > 0 ? neg.Min() * 0.6 : double.NaN; // one sample: stay strict
+            double maxPos = pos.Max();
+            if (neg.Count == 0) return maxPos * 1.4;
+            double minNeg = neg.Min();
+            // Repeats are judged against one fewer sample than real use, so lean a little toward accepting.
+            if (maxPos < minNeg) return maxPos + (minNeg - maxPos) * 0.6;
+            // Overlap: pick the cut with the fewest mistakes, counting a false trigger as worse than a miss.
+            var cuts = pos.Concat(neg).OrderBy(x => x).ToList();
+            double best = cuts[0] * 0.99, bestCost = pos.Count;
+            for (int i = 0; i < cuts.Count; i++)
+            {
+                double t = i + 1 < cuts.Count ? (cuts[i] + cuts[i + 1]) / 2 : cuts[i] * 1.01;
+                double cost = pos.Count(p => p > t) + 2.0 * neg.Count(n => n <= t);
+                if (cost < bestCost) { bestCost = cost; best = t; }
+            }
+            return best;
+        }
+
+        // A score is the distance to the closest sample divided by the learned threshold, so under 1 means
+        // "sounds like this command". Sensitivity scales that cut-off. Returns "on", "off" or null.
+        public string Match(float[][] f, double sensitivity, out double onScore, out double offScore)
         {
             onScore = Score("on", f);
             offScore = Score("off", f);
             string best = onScore <= offScore ? "on" : "off";
             double bestScore = Math.Min(onScore, offScore), otherScore = Math.Max(onScore, offScore);
-            if (bestScore > tolerance) return null;
-            if (otherScore - bestScore < 0.15) return null; // too close to call
+            if (bestScore > sensitivity) return null;
+            if (otherScore - bestScore < 0.1) return null; // too close to call
             return best;
         }
 
-        double Score(string cmd, float[][] f)
+        public double Score(string cmd, float[][] f)
         {
-            var list = Templates[cmd];
-            if (list.Count == 0 || !scale.ContainsKey(cmd)) return double.PositiveInfinity;
-            return list.Min(t => Features.Distance(f, t)) / Math.Max(scale[cmd], 1e-6);
+            double t;
+            if (!threshold.TryGetValue(cmd, out t)) return double.PositiveInfinity;
+            return Best(f, Templates[cmd], -1) / t;
         }
     }
 

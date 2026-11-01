@@ -1,11 +1,14 @@
-# Signs dist\VTT.exe with the code-signing certificate in your user certificate store
-# (creating a self-signed one on first use), then writes the release checksums.
-# A self-signed certificate proves the file is unchanged, but Windows still shows "Unknown publisher";
+# Signs the given files with the code-signing certificate in your user certificate store
+# (creating a self-signed one on first use), then writes dist\SHA256SUMS.txt for them.
+# A self-signed certificate proves the files are unchanged, but Windows still shows "Unknown publisher";
 # swap in a certificate from a trusted CA (or Azure Trusted Signing) to remove that.
-param([string]$Subject = "CN=Shiverbolt (V.T.T? self-signed)")
+param(
+    [string[]]$Files = @("dist\VTT.exe"),
+    [string]$Subject = "CN=Shiverbolt (V.T.T? self-signed)",
+    [switch]$NoSums
+)
 $ErrorActionPreference = "Stop"
-$root = Join-Path $PSScriptRoot ".."
-$exe = Join-Path $root "dist\VTT.exe"
+$root = Resolve-Path (Join-Path $PSScriptRoot "..")
 
 $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object { $_.Subject -eq $Subject -and $_.NotAfter -gt (Get-Date) } | Select-Object -First 1
 if (-not $cert) {
@@ -14,10 +17,17 @@ if (-not $cert) {
     Write-Host "Created certificate $($cert.Thumbprint)"
 }
 
-$sig = Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
-Write-Host "Signed: $($sig.SignerCertificate.Subject) (status: $($sig.Status) - 'UnknownError' is expected for a self-signed root)"
+$sums = @()
+foreach ($f in $Files) {
+    $path = Join-Path $root $f
+    $sig = Set-AuthenticodeSignature -FilePath $path -Certificate $cert -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
+    if (-not $sig.SignerCertificate) { throw "Signing failed for $f" }
+    Write-Host "Signed $f ($($sig.Status); 'UnknownError' is expected for a self-signed root)"
+    $sums += "{0}  {1}" -f (Get-FileHash $path -Algorithm SHA256).Hash.ToLower(), (Split-Path $path -Leaf)
+}
 
 Export-Certificate -Cert $cert -FilePath (Join-Path $root "dist\VTT-codesign.cer") | Out-Null
-$hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
-Set-Content -Path (Join-Path $root "dist\SHA256SUMS.txt") -Value "$hash  VTT.exe" -Encoding ascii
-Write-Host "SHA256 $hash"
+if (-not $NoSums) {
+    Set-Content -Path (Join-Path $root "dist\SHA256SUMS.txt") -Value $sums -Encoding ascii
+    $sums | ForEach-Object { Write-Host $_ }
+}

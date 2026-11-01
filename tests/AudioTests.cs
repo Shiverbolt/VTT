@@ -105,22 +105,30 @@ static class AudioTests
         Check(heard.Contains("microphone on") && heard.Contains("over and out"), "commands reach the recognizer through AudioPipe");
         Check(heard.Count == 2, "normal speech is not reported as a command");
 
-        // Recorded-sample matching.
+        // Recorded-sample matching, trained like the voice trainer does: repeats of each command
+        // at different speeds plus some ordinary speech.
         var m = new VoiceMatcher();
-        foreach (int r in new[] { -1, 0, 1 })
+        foreach (int r in new[] { -2, -1, 0, 1, 2, 0 })
         {
             foreach (var u in Segment(Say("mic on", voice, r))) m.Templates["on"].Add(Features.Compute(u));
             foreach (var u in Segment(Say("over and out", voice, r))) m.Templates["off"].Add(Features.Compute(u));
         }
+        foreach (var other in new[] { "Can you hear me okay?", "Let's push up together", "Good game everyone", "Wait for me", "Nice shot", "mic", "over" })
+            foreach (var u in Segment(Say(other, voice, 0))) m.Other.Add(Features.Compute(u));
         m.Recalibrate();
-        var cases = new[] { Tuple.Create("mic on", 2, "on"), Tuple.Create("over and out", -2, "off"),
-            Tuple.Create("mic off", 0, (string)null), Tuple.Create("my turn", 0, (string)null), Tuple.Create("on my way", 0, (string)null) };
+        Check(m.Ready, "matcher calibrated from training data");
+        var cases = new[] {
+            Tuple.Create("mic on", 3, "on"), Tuple.Create("mic on", -3, "on"), Tuple.Create("over and out", 3, "off"), Tuple.Create("over and out", -3, "off"),
+            Tuple.Create("okay, mic on", 0, "on"), Tuple.Create("alright, over and out", 0, "off"),
+            Tuple.Create("mic off", 0, (string)null), Tuple.Create("mic check", 0, (string)null), Tuple.Create("my turn", 0, (string)null),
+            Tuple.Create("on my way", 0, (string)null), Tuple.Create("over here", 0, (string)null), Tuple.Create("I'm going to reload now", 0, (string)null),
+            Tuple.Create("pick up the ammo on the left side", 0, (string)null) };
         foreach (var t in cases)
         {
             string got = null;
             double on = 0, off = 0;
-            foreach (var u in Segment(Say(t.Item1, voice, t.Item2))) got = m.Match(Features.Compute(u), 2.0, out on, out off) ?? got;
-            Check(got == t.Item3, string.Format("\"{0}\" -> {1} (on {2:0.00}, off {3:0.00})", t.Item1, got ?? "nothing", on, off));
+            foreach (var u in Segment(Say(t.Item1, voice, t.Item2))) got = m.Match(Features.Compute(u), 1.0, out on, out off) ?? got;
+            Check(got == t.Item3, string.Format("\"{0}\" rate {1} -> {2} (on {3:0.00}, off {4:0.00})", t.Item1, t.Item2, got ?? "nothing", on, off));
         }
 
         Console.WriteLine(failures == 0 ? "All tests passed" : failures + " test(s) failed");

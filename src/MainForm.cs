@@ -57,8 +57,10 @@ namespace VTT
         Label settingsHint;
         ComboBox modeBox, keyBox, inputBox, outputBox;
         TextBox onBox, offBox;
-        Stepper confStep, tolStep, autoOffStep;
-        Toggle filterToggle, soundsToggle;
+        Stepper confStep, sensStep, autoOffStep;
+        Toggle filterToggle, soundsToggle, askExitToggle;
+        TrainerPage trainer;
+        readonly bool startInTray;
         Control voicePanel, phrasePanel;
         readonly Dictionary<string, Label> sampleLabels = new Dictionary<string, Label>();
         readonly Dictionary<string, Button> recordButtons = new Dictionary<string, Button>();
@@ -69,8 +71,9 @@ namespace VTT
         readonly Stopwatch clock = new Stopwatch();
         readonly float[] rawBands = new float[SpectrumAnalyzer.Bands];
 
-        public MainForm()
+        public MainForm(bool startInTray)
         {
+            this.startInTray = startInTray;
             SuspendLayout();
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
@@ -93,6 +96,14 @@ namespace VTT
             loading = true;
             BuildSettings();
             loading = false;
+            trainer = new TrainerPage { Visible = false, Size = ClientSize };
+            trainer.RecordingsReady += SaveTraining;
+            trainer.Closed += CloseTrainer;
+            trainer.Classify = pcm => {
+                double on, off;
+                return matcher.Match(Features.Compute(pcm), settings.Sensitivity / 100.0, out on, out off);
+            };
+            Controls.Add(trainer);
             Controls.Add(settingsPanel);
             Controls.Add(view);
 
@@ -129,6 +140,7 @@ namespace VTT
                 StartAudio();
                 clock.Start();
                 frameTimer.Start();
+                if (this.startInTray) WindowState = FormWindowState.Minimized;
             };
         }
 
@@ -142,12 +154,14 @@ namespace VTT
         {
             base.OnResize(e);
             if (settingsPanel == null) return;
+            if (trainer != null) trainer.Size = ClientSize;
             settingsPanel.Size = ClientSize;
             settingsPanel.Left = slide >= 1 && slideDir == 0 ? 0 : ClientSize.Width;
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (keyData == Keys.Escape && trainer.Visible) { trainer.Cancel(); return true; }
             if (keyData == Keys.Escape && slide >= 1) { CloseSettings(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -189,6 +203,16 @@ namespace VTT
             content.Controls.Add(Row("Detect with", modeBox));
 
             var vp = Flow();
+            var train = Theme.FlatButton("Train my voice  ·  2 min");
+            train.Size = new Size(W, 38);
+            train.Margin = new Padding(0, 4, 0, 8);
+            train.BackColor = Theme.Accent;
+            train.ForeColor = Theme.Bg;
+            train.Font = Theme.Ui(10, true);
+            train.FlatAppearance.MouseOverBackColor = Theme.Lerp(Theme.Accent, Color.White, 0.15f);
+            train.Click += delegate { OpenTrainer(); };
+            vp.Controls.Add(train);
+            vp.Controls.Add(Note("Guided recording of your commands plus everyday phrases, so V.T.T? learns your voice and what to ignore. Or record single samples below."));
             foreach (var cmd in Commands)
             {
                 string c = cmd;
@@ -210,11 +234,11 @@ namespace VTT
                 vp.Controls.Add(row);
             }
             vp.Controls.Add(Meter());
-            tolStep = new Stepper { Min = 1, Max = 5, Step = 0.1, Format = "0.0" };
-            tolStep.Set(settings.Tolerance);
-            tolStep.ValueChanged += delegate { ScheduleApply(); };
-            vp.Controls.Add(Row("Match tolerance", tolStep));
-            vp.Controls.Add(Note("Record each command about 3 times. When using it, pause briefly before and after so it stands alone. Higher tolerance triggers more easily."));
+            sensStep = new Stepper { Min = 50, Max = 200, Step = 5, Suffix = "%" };
+            sensStep.Set(settings.Sensitivity);
+            sensStep.ValueChanged += delegate { ScheduleApply(); };
+            vp.Controls.Add(Row("Sensitivity", sensStep));
+            vp.Controls.Add(Note("Higher catches commands more easily; lower ignores more. Missed commands? Raise it. Random triggers? Lower it."));
             voicePanel = vp;
             content.Controls.Add(vp);
 
@@ -272,6 +296,18 @@ namespace VTT
             soundsToggle = NewToggle(settings.Sounds);
             content.Controls.Add(Row("On / off sounds", soundsToggle));
             RefreshDevices();
+
+            // Privacy
+            content.Controls.Add(Section("Privacy"));
+            askExitToggle = NewToggle(settings.AskDeleteOnExit);
+            content.Controls.Add(Row("Ask to delete recordings on quit", askExitToggle));
+            var wipe = Theme.FlatButton("Delete all my data");
+            wipe.Size = new Size(W, 34);
+            wipe.Margin = new Padding(0, 4, 0, 2);
+            wipe.ForeColor = Theme.Off;
+            wipe.Click += delegate { DeleteAllData(); };
+            content.Controls.Add(wipe);
+            content.Controls.Add(Note("Removes your voice recordings and settings from this PC (" + AppInfo.DataFolder.Replace(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "%APPDATA%") + "). Everything stays on this PC; nothing is ever uploaded."));
 
             // About
             content.Controls.Add(Section(""));
@@ -383,7 +419,8 @@ namespace VTT
             settings.OnPhrases = onBox.Text;
             settings.OffPhrases = offBox.Text;
             settings.MinConfidence = (int)confStep.Value;
-            settings.Tolerance = tolStep.Value;
+            settings.Sensitivity = (int)sensStep.Value;
+            settings.AskDeleteOnExit = askExitToggle.Checked;
             settings.FilterSpeech = filterToggle.Checked;
             settings.Key = (Keys)keyBox.SelectedItem;
             settings.AutoOffSeconds = (int)autoOffStep.Value;
@@ -442,6 +479,7 @@ namespace VTT
                 view.Animate(dt, rawBands, level);
                 foreach (var m in meters) m.Value = view.Level;
                 foreach (var t in toggles) t.Animate(dt);
+                if (trainer.Visible) trainer.Animate(dt, view.Level);
             }
 
             if (slideDir != 0)
@@ -572,14 +610,15 @@ namespace VTT
 
         void OnUtterance(short[] pcm)
         {
+            if (trainer.Visible) { trainer.OnUtterance(pcm); return; }
             if (recordTarget != null) { SaveSample(recordTarget, pcm); return; }
             if (!listening || !settings.UseRecordings) return;
             // Matching needs both commands: their distance from each other calibrates what counts as a match.
-            if (matcher.Templates["on"].Count == 0 || matcher.Templates["off"].Count == 0) return;
-            double on, off;
-            string cmd = matcher.Match(Features.Compute(pcm), settings.Tolerance, out on, out off);
-            SetHint(string.Format("on {0}  ·  off {1}  ·  needs under {2:0.0}{3}",
-                Fmt(on), Fmt(off), settings.Tolerance, cmd == null ? "" : "  →  mic " + cmd));
+            if (!matcher.Ready) return;
+            double on, off, cutoff = settings.Sensitivity / 100.0;
+            string cmd = matcher.Match(Features.Compute(pcm), cutoff, out on, out off);
+            SetHint(string.Format("on {0}  ·  off {1}  ·  needs under {2:0.00}{3}",
+                Fmt(on), Fmt(off), cutoff, cmd == null ? "" : "  →  mic " + cmd));
             if (cmd == "on") SetLive(true, "voice");
             else if (cmd == "off") SetLive(false, "voice");
         }
@@ -590,6 +629,8 @@ namespace VTT
 
         void LoadSamples()
         {
+            foreach (var cmd in Commands) { matcher.Templates[cmd].Clear(); sampleFiles[cmd].Clear(); }
+            matcher.Other.Clear();
             if (Directory.Exists(AppInfo.SamplesFolder))
             {
                 foreach (var cmd in Commands)
@@ -602,9 +643,108 @@ namespace VTT
                         }
                         catch { }
                     }
+                foreach (var file in Directory.GetFiles(AppInfo.SamplesFolder, "other_*.wav"))
+                {
+                    try { matcher.Other.Add(Features.Compute(Wav.Read(file))); } catch { }
+                }
             }
             matcher.Recalibrate();
             UpdateSampleLabels();
+        }
+
+        // ---------- voice trainer ----------
+
+        void OpenTrainer()
+        {
+            if (mic == null) { SetHint("The microphone isn't available. Pick another one under Audio."); return; }
+            if (recordTarget != null) StopRecording(null);
+            var on = Settings.Split(settings.OnPhrases).FirstOrDefault() ?? "mic on";
+            var off = Settings.Split(settings.OffPhrases).FirstOrDefault() ?? "over and out";
+            trainer.Begin(on, off);
+            trainer.Size = ClientSize;
+            trainer.Visible = true;
+            trainer.BringToFront();
+            if (live) SetLive(false, "training");
+        }
+
+        void CloseTrainer()
+        {
+            trainer.Visible = false;
+            SetHint(ListeningHint());
+            UpdateStatus();
+        }
+
+        // Replaces all earlier samples with the trainer's recordings.
+        void SaveTraining(TrainerPage.Recordings rec)
+        {
+            DeleteRecordings();
+            Directory.CreateDirectory(AppInfo.SamplesFolder);
+            string stamp = DateTime.Now.ToString("yyyyMMddHHmmss");
+            var groups = new[] { Tuple.Create("on", rec.On), Tuple.Create("off", rec.Off), Tuple.Create("other", rec.Other) };
+            foreach (var g in groups)
+                for (int i = 0; i < g.Item2.Count; i++)
+                    Wav.Write(Path.Combine(AppInfo.SamplesFolder, string.Format("{0}_{1}_{2:00}.wav", g.Item1, stamp, i)), g.Item2[i]);
+            LoadSamples();
+            if (modeBox.SelectedIndex != 0) modeBox.SelectedIndex = 0;
+            settings.UseRecordings = true;
+            settings.Save();
+            SyncEngine(false);
+            UpdateStatus();
+        }
+
+        static bool HasRecordings()
+        {
+            return Directory.Exists(AppInfo.SamplesFolder) && Directory.GetFiles(AppInfo.SamplesFolder, "*.wav").Length > 0;
+        }
+
+        // Deletes every recorded sample (commands and trainer phrases).
+        void DeleteRecordings()
+        {
+            if (Directory.Exists(AppInfo.SamplesFolder))
+                foreach (var f in Directory.GetFiles(AppInfo.SamplesFolder, "*.wav")) TryDelete(f);
+            foreach (var cmd in Commands) { matcher.Templates[cmd].Clear(); sampleFiles[cmd].Clear(); }
+            matcher.Other.Clear();
+            matcher.Recalibrate();
+            UpdateSampleLabels();
+        }
+
+        void DeleteAllData()
+        {
+            if (ThemedDialog.Show(this, "Delete all your data?",
+                "This removes your voice recordings and resets every setting to its default. It can't be undone.",
+                new[] { "Delete everything", "Cancel" }, 1, 0) != 0) return;
+            if (live) SetLive(false, "reset");
+            if (recordTarget != null) StopRecording(null);
+            DeleteRecordings();
+            try { if (Directory.Exists(AppInfo.DataFolder)) Directory.Delete(AppInfo.DataFolder, true); } catch { }
+            string oldInput = settings.InputDevice;
+            settings = new Settings();
+            SyncControls();
+            if (settings.InputDevice != oldInput) RestartMic();
+            heldKey = settings.Key;
+            SyncEngine(true);
+            UpdateStatus();
+            SetHint("All your data was deleted. Settings are back to defaults.");
+        }
+
+        // Puts the current settings back into the settings page controls.
+        void SyncControls()
+        {
+            loading = true;
+            modeBox.SelectedIndex = settings.UseRecordings ? 0 : 1;
+            onBox.Text = settings.OnPhrases;
+            offBox.Text = settings.OffPhrases;
+            confStep.Set(settings.MinConfidence);
+            sensStep.Set(settings.Sensitivity);
+            filterToggle.Checked = settings.FilterSpeech;
+            keyBox.SelectedItem = settings.Key;
+            autoOffStep.Set(settings.AutoOffSeconds);
+            soundsToggle.Checked = settings.Sounds;
+            askExitToggle.Checked = settings.AskDeleteOnExit;
+            RefreshDevices();
+            UpdateModePanels();
+            loading = false;
+            applyTimer.Stop();
         }
 
         void UpdateSampleLabels()
@@ -701,7 +841,7 @@ namespace VTT
                 var off = Settings.Split(settings.OffPhrases).FirstOrDefault() ?? "mic off";
                 return string.Format("Say “{0}” or “{1}”", on, off);
             }
-            if (sampleFiles["on"].Count == 0 || sampleFiles["off"].Count == 0) return "Open settings to record your ON and OFF commands";
+            if (!matcher.Ready) return "Open settings and choose “Train my voice” to get started";
             return "Listening for your voice commands";
         }
 
@@ -768,9 +908,17 @@ namespace VTT
         {
             if (live) KeySender.Send(heldKey, false);
             live = false;
+            if (applyTimer.Enabled) { applyTimer.Stop(); ApplySettings(); }
+            if (e.CloseReason == CloseReason.UserClosing && settings.AskDeleteOnExit && HasRecordings())
+            {
+                int choice = ThemedDialog.Show(Visible ? this : null, "Delete your voice recordings?",
+                    "Your recorded commands are stored on this PC. Delete them now? You'd need to train again next time.",
+                    new[] { "Delete", "Keep", "Keep, don't ask again" }, 1, 0);
+                if (choice == 0) DeleteRecordings();
+                else if (choice == 2) { settings.AskDeleteOnExit = false; settings.Save(); }
+            }
             frameTimer.Stop();
             tray.Visible = false;
-            if (applyTimer.Enabled) { applyTimer.Stop(); ApplySettings(); }
             if (mic != null) mic.Dispose();
             if (engine != null) engine.RecognizeAsyncCancel();
             pipe.Close();
