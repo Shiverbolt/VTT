@@ -41,8 +41,6 @@ namespace VTT
         Grammar commandGrammar;
         HashSet<string> onSet, offSet;
         bool engineRunning, engineStopping, reloadPending;
-        readonly short[] onTone = Tone(660, 990), offTone = Tone(880, 520);
-
         // state
         string recordTarget;
         bool live, listening = true, loading;
@@ -66,7 +64,19 @@ namespace VTT
         ComboBox modeBox, keyBox, inputBox, outputBox;
         TextBox onBox, offBox;
         Stepper confStep, sensStep, autoOffStep;
-        Toggle filterToggle, soundsToggle, askExitToggle, earlyToggle, assistToggle;
+        Toggle filterToggle, soundsToggle, askExitToggle, earlyToggle, assistToggle, indicatorToggle;
+        ComboBox packBox, styleBox, paletteBox;
+        Control customSoundPanel;
+        readonly Dictionary<string, Button> soundRecordButtons = new Dictionary<string, Button>();
+        string soundRecordTarget; // "on" / "off" while recording a custom sound
+        Stats stats = Stats.Load();
+        StatTiles statTiles;
+        BadgeGrid badgeGrid;
+        Label statsNote;
+        MicIndicator indicator;
+        string typed = "";        // last few letters typed in the main window, for the party easter egg
+        float statsClock;
+        int frameCount;
         TrainerPage trainer;
         readonly bool startInTray;
         Control voicePanel, phrasePanel;
@@ -131,7 +141,10 @@ namespace VTT
             frameTimer = new Timer { Interval = 15 };
             frameTimer.Tick += delegate { Frame(); };
             recordTimer = new Timer { Interval = 8000 };
-            recordTimer.Tick += delegate { StopRecording("Didn't hear anything. Try recording again."); };
+            recordTimer.Tick += delegate {
+                if (soundRecordTarget != null) StopSoundRecording("Didn't hear anything. Try recording again.");
+                else StopRecording("Didn't hear anything. Try recording again.");
+            };
             abortTimer = new Timer { Interval = 700 };
             abortTimer.Tick += delegate { abortTimer.Stop(); AbortCut(); };
             applyTimer = new Timer { Interval = 450 };
@@ -142,6 +155,7 @@ namespace VTT
             segmenter.Progress += p => { try { BeginInvoke(new Action(() => OnProgress(p))); } catch { } };
 
             heldKey = settings.Key;
+            view.Style = settings.OrbStyle;
             LoadSamples();
             UpdateModePanels();
             UpdateStatus();
@@ -151,6 +165,8 @@ namespace VTT
             Shown += delegate {
                 Theme.DarkScrollbars(settingsPanel);
                 StartAudio();
+                stats.MarkUsed();
+                UpdateIndicator();
                 clock.Start();
                 frameTimer.Start();
                 if (this.startInTray) WindowState = FormWindowState.Minimized;
@@ -316,6 +332,61 @@ namespace VTT
             content.Controls.Add(Row("On / off sounds", soundsToggle));
             RefreshDevices();
 
+            // Look & sound
+            content.Controls.Add(Section("Look & sound"));
+            packBox = Choice(SoundPacks.Names, settings.SoundPack, 158);
+            packBox.SelectedIndexChanged += delegate { UpdateSoundPanel(); ScheduleApply(); PreviewSound(); };
+            var preview = Theme.FlatButton(Theme.GlyphPlay, true);
+            preview.Size = new Size(32, 30);
+            preview.Click += delegate { PreviewSound(); };
+            var packRow = new Panel { Size = new Size(196, 30), BackColor = Theme.Bg };
+            packBox.Location = new Point(0, 2);
+            preview.Location = new Point(164, 0);
+            packRow.Controls.Add(packBox);
+            packRow.Controls.Add(preview);
+            content.Controls.Add(Row("Sound pack", packRow));
+            var csp = Flow();
+            foreach (var which in new[] { "on", "off" })
+            {
+                string w = which;
+                var row = new Panel { Size = new Size(W, 40), Margin = new Padding(0, 0, 0, 4), BackColor = Theme.Bg };
+                var lbl = Theme.Caption("Your " + w.ToUpperInvariant() + " sound", Theme.TextDim);
+                lbl.Bounds = new Rectangle(16, 0, 170, 40);
+                var rec = Theme.FlatButton("Record");
+                rec.Bounds = new Rectangle(W - 124, 4, 88, 32);
+                rec.Click += delegate { StartSoundRecording(w); };
+                var play = Theme.FlatButton(Theme.GlyphPlay, true);
+                play.Bounds = new Rectangle(W - 32, 4, 32, 32);
+                play.Click += delegate { Play(SoundPacks.Get(SoundPacks.Custom, w == "on")); };
+                row.Controls.AddRange(new Control[] { lbl, rec, play });
+                soundRecordButtons[w] = rec;
+                csp.Controls.Add(row);
+            }
+            csp.Controls.Add(Note("Make any short sound - a word, a click, a whistle. Up to 1.5 s is kept."));
+            customSoundPanel = csp;
+            content.Controls.Add(csp);
+            styleBox = Choice(OrbView.Styles, settings.OrbStyle, 158);
+            styleBox.SelectedIndexChanged += delegate { view.Style = (string)styleBox.SelectedItem; ScheduleApply(); };
+            content.Controls.Add(Row("Orb style", styleBox));
+            paletteBox = Choice(Palette.All.Select(p => p.Name).ToArray(), settings.Palette, 158);
+            paletteBox.SelectedIndexChanged += delegate { settings.Palette = (string)paletteBox.SelectedItem; UpdateStatus(); ScheduleApply(); };
+            content.Controls.Add(Row("Colors", paletteBox));
+            indicatorToggle = NewToggle(settings.ShowIndicator);
+            content.Controls.Add(Row("Floating mic indicator", indicatorToggle));
+            content.Controls.Add(Note("A small always-on-top pill that shows when you're live, over your game (windowed or borderless). Drag it anywhere; double-click opens V.T.T?, right-click for options."));
+
+            // Stats & badges
+            content.Controls.Add(Section("Stats & badges"));
+            statTiles = new StatTiles { Stats = stats, Margin = new Padding(0, 4, 0, 8) };
+            content.Controls.Add(statTiles);
+            statsNote = Note("", 40);
+            content.Controls.Add(statsNote);
+            badgeGrid = new BadgeGrid { Stats = stats, Margin = new Padding(0, 4, 0, 4) };
+            content.Controls.Add(badgeGrid);
+            content.Controls.Add(Note("Stats stay on this PC and are removed by Delete all my data."));
+            UpdateSoundPanel();
+            RefreshStats();
+
             // Privacy
             content.Controls.Add(Section("Privacy"));
             askExitToggle = NewToggle(settings.AskDeleteOnExit);
@@ -339,6 +410,25 @@ namespace VTT
             settingsPanel.Controls.AddRange(new Control[] { back, title, settingsHint, content });
         }
 
+        static ComboBox Choice(string[] items, string selected, int width)
+        {
+            var c = Theme.Combo();
+            c.Width = width;
+            c.Items.AddRange(items);
+            c.SelectedItem = items.Contains(selected) ? selected : items[0];
+            return c;
+        }
+
+        void UpdateSoundPanel() { customSoundPanel.Visible = (string)packBox.SelectedItem == SoundPacks.Custom; }
+
+        void RefreshStats()
+        {
+            statTiles.Invalidate();
+            badgeGrid.Invalidate();
+            statsNote.Text = string.Format("{0} voice commands  ·  {1} OFFs cut early  ·  {2} live in total  ·  {3} of {4} badges",
+                stats.VoiceOn + stats.VoiceOff, stats.EarlyCuts, Stats.Duration(stats.TotalLive), stats.Badges.Count, Badge.All.Length);
+        }
+
         static FlowLayoutPanel Flow()
         {
             return new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true,
@@ -348,6 +438,7 @@ namespace VTT
         static Label Section(string text)
         {
             var l = Theme.Caption(text.ToUpperInvariant(), Theme.TextFaint, 8);
+            l.UseMnemonic = false; // show "&" as is
             l.Font = Theme.Ui(8, true);
             l.Size = new Size(W, 26);
             l.Margin = new Padding(0, 14, 0, 4);
@@ -442,6 +533,11 @@ namespace VTT
             settings.AskDeleteOnExit = askExitToggle.Checked;
             settings.EarlyCut = earlyToggle.Checked;
             settings.SpeechAssist = assistToggle.Checked;
+            settings.SoundPack = (string)packBox.SelectedItem;
+            settings.OrbStyle = (string)styleBox.SelectedItem;
+            settings.Palette = (string)paletteBox.SelectedItem;
+            settings.ShowIndicator = indicatorToggle.Checked;
+            UpdateIndicator();
             settings.FilterSpeech = filterToggle.Checked;
             settings.Key = (Keys)keyBox.SelectedItem;
             settings.AutoOffSeconds = (int)autoOffStep.Value;
@@ -465,6 +561,7 @@ namespace VTT
         {
             if (slideDir != 0 || slide > 0) return;
             RefreshDevices();
+            RefreshStats();
             view.Overlay = Snapshot();
             slideDir = 1;
         }
@@ -501,6 +598,24 @@ namespace VTT
                 foreach (var m in meters) m.Value = view.Level;
                 foreach (var t in toggles) t.Animate(dt);
                 if (trainer.Visible) trainer.Animate(dt, view.Level);
+            }
+            if (indicator != null && indicator.Visible && ++frameCount % 2 == 0)
+                indicator.Render(dt * 2, view.Status, view.TargetColor, listening ? level : 0, KeyIsDown);
+
+            // Stats: count time with the key held; once a second look for new badges, every 30 s save.
+            if (KeyIsDown) stats.AddLive(dt);
+            statsClock += dt;
+            if (statsClock >= 1)
+            {
+                statsClock = 0;
+                foreach (var b in stats.NewBadges())
+                {
+                    view.ShowToast("Badge unlocked: " + b.Name);
+                    if (settings.Sounds) Play(SoundPacks.Get("Soft chime", true));
+                    stats.Save();
+                }
+                if (slide >= 1) RefreshStats();
+                if (DateTime.Now.Second % 30 == 0) stats.Save();
             }
 
             if (slideDir != 0)
@@ -595,12 +710,13 @@ namespace VTT
             }
         }
 
+        const string PartyPhrase = "party mode";
+
         void LoadGrammars()
         {
             onSet = new HashSet<string>(Settings.Split(settings.OnPhrases));
             offSet = new HashSet<string>(Settings.Split(settings.OffPhrases));
-            var all = onSet.Concat(offSet).Distinct().ToArray();
-            if (all.Length == 0) all = new[] { "mic on", "mic off" };
+            var all = onSet.Concat(offSet).Concat(new[] { PartyPhrase }).Distinct().ToArray();
 
             engine.UnloadAllGrammars();
             var builder = new GrammarBuilder(new Choices(all)) { Culture = engine.RecognizerInfo.Culture };
@@ -620,6 +736,7 @@ namespace VTT
             if (result.Grammar != commandGrammar || recordTarget != null || trainer.Visible || !listening) return;
             string text = result.Text.ToLowerInvariant();
             int conf = (int)Math.Round(result.Confidence * 100);
+            if (text == PartyPhrase) { if (conf >= 55) ToggleParty(); return; }
             if (settings.UseRecordings)
             {
                 // Double-check mode: only evidence, acted on when the voice-sample score roughly agrees.
@@ -635,8 +752,8 @@ namespace VTT
                 return;
             }
             SetHint(string.Format("Heard “{0}”  ·  {1}%", text, conf));
-            if (onSet.Contains(text)) SetLive(true, text);
-            else if (offSet.Contains(text)) SetLive(false, text);
+            if (onSet.Contains(text)) SetLive(true, "phrase");
+            else if (offSet.Contains(text)) SetLive(false, "phrase");
         }
 
         void OnUtterance(short[] pcm)
@@ -644,6 +761,7 @@ namespace VTT
             earlyBlocked = false;
             lastProgressLength = 0;
             if (trainer.Visible) { trainer.OnUtterance(pcm); return; }
+            if (soundRecordTarget != null) { SaveCustomSound(pcm); return; }
             if (recordTarget != null) { SaveSample(recordTarget, pcm); return; }
             if (!listening || !settings.UseRecordings) { AbortCut(); return; }
             // Matching needs both commands: their distance from each other calibrates what counts as a match.
@@ -806,6 +924,8 @@ namespace VTT
             settings.UseRecordings = true;
             settings.Save();
             SyncEngine(true);
+            stats.Trainings++;
+            stats.Changed();
             UpdateStatus();
         }
 
@@ -844,6 +964,11 @@ namespace VTT
             try { if (Directory.Exists(AppInfo.DataFolder)) Directory.Delete(AppInfo.DataFolder, true); } catch { }
             string oldInput = settings.InputDevice;
             settings = new Settings();
+            stats = new Stats();
+            statTiles.Stats = stats;
+            badgeGrid.Stats = stats;
+            RefreshStats();
+            if (view.Party) view.SetParty(false);
             SyncControls();
             if (settings.InputDevice != oldInput) RestartMic();
             heldKey = settings.Key;
@@ -868,6 +993,13 @@ namespace VTT
             askExitToggle.Checked = settings.AskDeleteOnExit;
             earlyToggle.Checked = settings.EarlyCut;
             assistToggle.Checked = settings.SpeechAssist;
+            packBox.SelectedItem = settings.SoundPack;
+            styleBox.SelectedItem = settings.OrbStyle;
+            paletteBox.SelectedItem = settings.Palette;
+            indicatorToggle.Checked = settings.ShowIndicator;
+            view.Style = settings.OrbStyle;
+            UpdateSoundPanel();
+            UpdateIndicator();
             RefreshDevices();
             UpdateModePanels();
             loading = false;
@@ -990,7 +1122,10 @@ namespace VTT
                 if (on) { KeySender.Send(heldKey, true); UpdateStatus(); return; }
                 live = false;
                 lastSpeech = DateTime.Now;
-                if (settings.Sounds) WavePlayer.Play(offTone, 22050, OutputIndex());
+                stats.EarlyCuts++;
+                stats.VoiceOff++;
+                stats.Changed();
+                if (settings.Sounds) Play(SoundPacks.Get(settings.SoundPack, false));
                 UpdateStatus();
                 return;
             }
@@ -998,8 +1133,26 @@ namespace VTT
             live = on;
             KeySender.Send(heldKey, on);
             lastSpeech = DateTime.Now;
-            if (settings.Sounds) WavePlayer.Play(on ? onTone : offTone, 22050, OutputIndex());
+            if (reason == "voice" || reason == "speech" || reason == "phrase") // spoken commands count for stats
+            {
+                if (on) stats.VoiceOn++; else stats.VoiceOff++;
+                stats.Changed();
+            }
+            if (settings.Sounds) Play(SoundPacks.Get(settings.SoundPack, on));
             UpdateStatus();
+        }
+
+        void Play(Sound sound) { WavePlayer.Play(sound.Pcm, sound.Rate, OutputIndex()); }
+
+        void PreviewSound()
+        {
+            if (loading) return;
+            var pack = (string)packBox.SelectedItem;
+            Play(SoundPacks.Get(pack, true));
+            var off = SoundPacks.Get(pack, false);
+            var t = new Timer { Interval = 550 };
+            t.Tick += delegate { t.Stop(); t.Dispose(); Play(off); };
+            t.Start();
         }
 
         void SetListening(bool on)
@@ -1014,10 +1167,12 @@ namespace VTT
         void UpdateStatus()
         {
             string status;
-            if (recordTarget != null) { view.TargetColor = Theme.Record; status = "Recording " + recordTarget.ToUpperInvariant(); view.Glyph = Theme.GlyphMic; }
-            else if (!listening) { view.TargetColor = Theme.Paused; status = "Paused"; view.Glyph = Theme.GlyphPause; }
-            else if (KeyIsDown) { view.TargetColor = Theme.Live; status = "Live"; view.Glyph = Theme.GlyphMic; }
-            else { view.TargetColor = Theme.Off; status = "Mic off"; view.Glyph = Theme.GlyphMicOff; }
+            var pal = Palette.Find(settings.Palette);
+            string recording = recordTarget ?? soundRecordTarget;
+            if (recording != null) { view.TargetColor = pal.Record; status = "Recording " + recording.ToUpperInvariant(); view.Glyph = Theme.GlyphMic; }
+            else if (!listening) { view.TargetColor = pal.Paused; status = "Paused"; view.Glyph = Theme.GlyphPause; }
+            else if (KeyIsDown) { view.TargetColor = pal.Live; status = "Live"; view.Glyph = Theme.GlyphMic; }
+            else { view.TargetColor = pal.Off; status = "Mic off"; view.Glyph = Theme.GlyphMicOff; }
             view.Status = status;
             view.Paused = !listening;
             view.Footer = string.Format("Holds {0}  ·  {1}", heldKey, settings.UseRecordings ? "voice samples" : "phrases");
@@ -1059,7 +1214,9 @@ namespace VTT
                 else if (choice == 2) { settings.AskDeleteOnExit = false; settings.Save(); }
             }
             frameTimer.Stop();
+            stats.Save();
             tray.Visible = false;
+            if (indicator != null) indicator.Close();
             if (mic != null) mic.Dispose();
             if (engine != null) engine.RecognizeAsyncCancel();
             pipe.Close();
@@ -1067,21 +1224,90 @@ namespace VTT
             base.OnFormClosing(e);
         }
 
-        // Short sine sweep used as the on / off sound.
-        static short[] Tone(double fromHz, double toHz)
+        // ---------- floating indicator ----------
+
+        void UpdateIndicator()
         {
-            const int rate = 22050;
-            int samples = rate * 12 / 100;
-            var pcm = new short[samples];
-            double phase = 0;
-            for (int i = 0; i < samples; i++)
+            if (!settings.ShowIndicator)
             {
-                double t = (double)i / samples;
-                phase += 2 * Math.PI * (fromHz + (toHz - fromHz) * t) / rate;
-                double envelope = Math.Min(1, Math.Min(t * 20, (1 - t) * 10));
-                pcm[i] = (short)(Math.Sin(phase) * envelope * 9000);
+                if (indicator != null) indicator.Hide();
+                return;
             }
-            return pcm;
+            if (indicator == null)
+            {
+                indicator = new MicIndicator();
+                indicator.OpenRequested += ShowFromTray;
+                indicator.ToggleRequested += delegate { if (recordTarget == null) SetLive(!live, "clicked"); };
+                indicator.HideRequested += delegate { indicatorToggle.Checked = false; ApplySettings(); };
+                indicator.Moved += p => { settings.IndicatorX = p.X; settings.IndicatorY = p.Y; settings.Save(); };
+                indicator.PlaceAt(settings.IndicatorX, settings.IndicatorY);
+            }
+            if (!indicator.Visible) indicator.Show();
+        }
+
+        // ---------- party mode ----------
+
+        void ToggleParty()
+        {
+            bool on = !view.Party;
+            view.SetParty(on);
+            if (on)
+            {
+                stats.Parties++;
+                stats.Changed();
+                if (settings.Sounds) Play(SoundPacks.Fanfare());
+                SetHint("Party mode! Say “party mode” again (or type party) to stop.");
+            }
+            else SetHint(ListeningHint());
+        }
+
+        // Typing "party" anywhere in the main window (not in a text box) also starts it.
+        protected override void OnKeyPress(KeyPressEventArgs e)
+        {
+            base.OnKeyPress(e);
+            if (ActiveControl is TextBox || char.IsControl(e.KeyChar)) return;
+            typed = (typed + char.ToLowerInvariant(e.KeyChar));
+            if (typed.Length > 5) typed = typed.Substring(typed.Length - 5);
+            if (typed == "party") { typed = ""; ToggleParty(); }
+        }
+
+        // ---------- custom sounds ----------
+
+        void StartSoundRecording(string which)
+        {
+            if (mic == null) { SetHint("The microphone isn't available. Pick another one under Audio."); return; }
+            if (recordTarget != null) StopRecording(null);
+            StopSoundRecording(null);
+            soundRecordTarget = which;
+            soundRecordButtons[which].Text = "Listening…";
+            soundRecordButtons[which].BackColor = Theme.Record;
+            soundRecordButtons[which].ForeColor = Theme.Bg;
+            SetHint("Make your " + which.ToUpperInvariant() + " sound now, then stay quiet for a moment.");
+            recordTimer.Stop();
+            recordTimer.Start();
+            UpdateStatus();
+        }
+
+        void StopSoundRecording(string message)
+        {
+            if (soundRecordTarget == null) return;
+            recordTimer.Stop();
+            soundRecordButtons[soundRecordTarget].Text = "Record";
+            soundRecordButtons[soundRecordTarget].BackColor = Theme.Surface;
+            soundRecordButtons[soundRecordTarget].ForeColor = Theme.Text;
+            soundRecordTarget = null;
+            if (message != null) SetHint(message);
+            UpdateStatus();
+        }
+
+        void SaveCustomSound(short[] pcm)
+        {
+            bool on = soundRecordTarget == "on";
+            var file = SoundPacks.CustomFile(on);
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+            Wav.Write(file, SoundPacks.PrepareCustom(pcm));
+            StopSoundRecording("Saved your " + (on ? "ON" : "OFF") + " sound.");
+            Play(SoundPacks.Get(SoundPacks.Custom, on));
         }
     }
 }

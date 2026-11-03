@@ -8,7 +8,7 @@
   <img src="docs/screenshot-settings.png" width="260" alt="Settings">
 </p>
 
-> **1.0 beta 3** - works, but expect rough edges. Please [open an issue](https://github.com/Shiverbolt/VTT/issues) if something misbehaves.
+> **1.0 beta 4** - works, but expect rough edges. Please [open an issue](https://github.com/Shiverbolt/VTT/issues) if something misbehaves.
 
 ## Features
 
@@ -18,14 +18,17 @@
 - **Double-checked by speech recognition** - the words of your commands are also listened for, so borderline matches still count.
 - **Or spoken phrases** - type phrases like `mic on` / `over and out` and let the built-in Windows speech recognizer listen for them.
 - **Works with anything that has push-to-talk** - Discord, TeamSpeak, Mumble, OBS, games. V.T.T? simply holds the key you choose (default **F13**, a key no keyboard has, so it never clashes with typing).
-- **Live voice spectrum** around an animated orb, so you can see it hearing you.
-- **Pick your microphone and sound output**, optional on/off sounds, auto-off after silence, tray icon, start with Windows.
+- **Live voice spectrum** around an animated orb, in four styles (Bars, Wave, Particles, Blob) and four palettes (Classic, Neon, Pastel, Stealth).
+- **Sound packs** for the on/off sound: Classic, Walkie-talkie, Sci-fi, 8-bit arcade, Soft chime - or record your own.
+- **Floating mic indicator** - a tiny always-on-top pill that shows when you're live, over your game. Drag it anywhere.
+- **Talk stats and badges** - live time today and this week, your streak, and 10 badges to unlock. (There may also be a party hidden somewhere.)
+- **Pick your microphone and sound output**, auto-off after silence, tray icon, start with Windows.
 - **Private and offline** - audio never leaves your PC. Delete your recordings any time from settings, and V.T.T? offers to delete them when you quit.
 - **Proper installer** - choose the install folder, shortcuts and startup; uninstall from Windows *Apps & features*.
 
 ## Get started
 
-1. Download `VTT-Setup-1.0.0-beta.3.exe` from the [latest release](https://github.com/Shiverbolt/VTT/releases) and run it. The default folder (`%LOCALAPPDATA%\Programs\VTT`) needs no admin rights; pick another with **Browse**.
+1. Download `VTT-Setup-1.0.0-beta.4.exe` from the [latest release](https://github.com/Shiverbolt/VTT/releases) and run it. The default folder (`%LOCALAPPDATA%\Programs\VTT`) needs no admin rights; pick another with **Browse**.
    Prefer no installer? Download the portable `VTT.exe` instead and just run it.
 2. In Discord (or your app), switch to **Push to Talk** and click the keybind box.
 3. In V.T.T?, open **Settings** (gear icon) and click **Press the key in 3 seconds** - your app records the key.
@@ -55,17 +58,17 @@ Recordings and settings live only in `%APPDATA%\VTT` (`samples\*.wav`, `settings
 The installer and `VTT.exe` are signed with a **self-signed** certificate (published as `VTT-codesign.cer` with each release), so Windows still shows *"Unknown publisher"* and SmartScreen may warn on first run (*More info → Run anyway*). The signature lets you confirm the files weren't altered; compare their SHA-256 with `SHA256SUMS.txt` in the release:
 
 ```powershell
-Get-FileHash .\VTT-Setup-1.0.0-beta.3.exe -Algorithm SHA256
+Get-FileHash .\VTT-Setup-1.0.0-beta.4.exe -Algorithm SHA256
 ```
 
 Some games with anti-cheat ignore simulated key presses; in those, use the game's open-mic mode and V.T.T? with your voice chat app instead.
 
 ## Installer options
 
-`VTT-Setup-1.0.0-beta.3.exe` also runs unattended:
+`VTT-Setup-1.0.0-beta.4.exe` also runs unattended:
 
 ```powershell
-.\VTT-Setup-1.0.0-beta.3.exe /S /dir="D:\Apps\VTT" /desktop=0 /startmenu=1 /startup=0 /run=1
+.\VTT-Setup-1.0.0-beta.4.exe /S /dir="D:\Apps\VTT" /desktop=0 /startmenu=1 /startup=0 /run=1
 & "$env:LOCALAPPDATA\Programs\VTT\Uninstall VTT.exe" /uninstall /S /removedata=1
 ```
 
@@ -79,7 +82,7 @@ No SDK required - Windows ships the C# compiler.
 .\tools\package.ps1     # signed VTT.exe + installer + SHA256SUMS.txt in dist\
 ```
 
-Code layout: `src/Audio.cs` (capture, spectrum, voice matching), `src/Trainer.cs` (voice trainer), `src/MainForm.cs` (app logic and settings), `src/OrbView.cs` (main screen), `src/Ui.cs` (theme, dialogs and controls, shared with the installer), `src/Program.cs` (entry point, settings, key sending), `installer/Setup.cs` (installer and uninstaller).
+Code layout: `src/Audio.cs` (capture, spectrum, voice matching), `src/Trainer.cs` (voice trainer), `src/Sounds.cs` (sound packs), `src/Overlay.cs` (floating indicator), `src/Stats.cs` (stats and badges), `src/MainForm.cs` (app logic and settings), `src/OrbView.cs` (main screen), `src/Ui.cs` (theme, dialogs and controls, shared with the installer), `src/Program.cs` (entry point, settings, key sending), `installer/Setup.cs` (installer and uninstaller).
 
 ## License
 

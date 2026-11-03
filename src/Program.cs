@@ -1,4 +1,4 @@
-// V.T.T? - voice-activated push-to-talk.
+﻿// V.T.T? - voice-activated push-to-talk.
 // Say an "on" command and the app holds your push-to-talk key down; say an "off" command and it releases it.
 using System;
 using System.Collections.Generic;
@@ -14,16 +14,16 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Voice-activated push-to-talk: say a command to hold your push-to-talk key, say another to release it.")]
 [assembly: AssemblyProduct("V.T.T?")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Shiverbolt. MIT License.")]
-[assembly: AssemblyVersion("1.0.0.3")]
-[assembly: AssemblyFileVersion("1.0.0.3")]
-[assembly: AssemblyInformationalVersion("1.0.0-beta.3")]
+[assembly: AssemblyVersion("1.0.0.4")]
+[assembly: AssemblyFileVersion("1.0.0.4")]
+[assembly: AssemblyInformationalVersion("1.0.0-beta.4")]
 
 namespace VTT
 {
     static class AppInfo
     {
         public const string Name = "V.T.T?";
-        public const string Version = "1.0 beta 3";
+        public const string Version = "1.0 beta 4";
         public const string RepoUrl = "https://github.com/Shiverbolt/VTT";
         public static readonly string DataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VTT");
         public static readonly string SamplesFolder = Path.Combine(DataFolder, "samples");
@@ -76,6 +76,9 @@ namespace VTT
         public bool AskDeleteOnExit = true;
         public bool EarlyCut = true;     // release the key as soon as you start saying the OFF command
         public bool SpeechAssist = true; // Windows speech recognition confirms borderline voice-sample matches
+        public string SoundPack = "Classic", OrbStyle = "Bars", Palette = "Classic";
+        public bool ShowIndicator = false;
+        public int IndicatorX = -100000, IndicatorY = -100000; // unset: top-right corner
         public string InputDevice = "", OutputDevice = ""; // empty = Windows default
 
         public static string FilePath { get { return Path.Combine(AppInfo.DataFolder, "settings.txt"); } }
@@ -102,6 +105,12 @@ namespace VTT
                         case "askonexit": s.AskDeleteOnExit = bool.Parse(v); break;
                         case "earlycut": s.EarlyCut = bool.Parse(v); break;
                         case "speechassist": s.SpeechAssist = bool.Parse(v); break;
+                        case "soundpack": s.SoundPack = v; break;
+                        case "orbstyle": s.OrbStyle = v; break;
+                        case "palette": s.Palette = v; break;
+                        case "indicator": s.ShowIndicator = bool.Parse(v); break;
+                        case "indicatorx": s.IndicatorX = int.Parse(v); break;
+                        case "indicatory": s.IndicatorY = int.Parse(v); break;
                         case "autooff": s.AutoOffSeconds = int.Parse(v); break;
                         case "sounds": s.Sounds = bool.Parse(v); break;
                         case "filter": s.FilterSpeech = bool.Parse(v); break;
@@ -124,6 +133,8 @@ namespace VTT
                     "key=" + Key, "confidence=" + MinConfidence, "sensitivity=" + Sensitivity,
                     "autooff=" + AutoOffSeconds, "sounds=" + Sounds, "filter=" + FilterSpeech, "askonexit=" + AskDeleteOnExit,
                     "earlycut=" + EarlyCut, "speechassist=" + SpeechAssist,
+                    "soundpack=" + SoundPack, "orbstyle=" + OrbStyle, "palette=" + Palette,
+                    "indicator=" + ShowIndicator, "indicatorx=" + IndicatorX, "indicatory=" + IndicatorY,
                     "input=" + InputDevice, "output=" + OutputDevice });
             }
             catch { }

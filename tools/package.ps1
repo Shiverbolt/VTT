@@ -3,7 +3,7 @@
 $ErrorActionPreference = "Stop"
 $fw = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$version = "1.0.0-beta.3"
+$version = "1.0.0-beta.4"
 $setup = "VTT-Setup-$version.exe"
 
 Push-Location $root

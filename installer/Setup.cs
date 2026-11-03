@@ -20,15 +20,15 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Installer for V.T.T?, voice-activated push-to-talk.")]
 [assembly: AssemblyProduct("V.T.T?")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Shiverbolt. MIT License.")]
-[assembly: AssemblyVersion("1.0.0.3")]
-[assembly: AssemblyFileVersion("1.0.0.3")]
-[assembly: AssemblyInformationalVersion("1.0.0-beta.3")]
+[assembly: AssemblyVersion("1.0.0.4")]
+[assembly: AssemblyFileVersion("1.0.0.4")]
+[assembly: AssemblyInformationalVersion("1.0.0-beta.4")]
 
 namespace VTT.Setup
 {
     static class Info
     {
-        public const string Name = "V.T.T?", Version = "1.0.0-beta.3", DisplayVersion = "1.0 beta 3", Publisher = "Shiverbolt";
+        public const string Name = "V.T.T?", Version = "1.0.0-beta.4", DisplayVersion = "1.0 beta 4", Publisher = "Shiverbolt";
         public const string Url = "https://github.com/Shiverbolt/VTT";
         public const string ExeName = "VTT.exe", UninstallerName = "Uninstall VTT.exe", LicenseName = "LICENSE.txt", ShortcutName = "V.T.T.lnk";
         public const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\VTT";
