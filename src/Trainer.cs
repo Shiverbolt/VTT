@@ -15,11 +15,14 @@ namespace VTT
         public class Recordings
         {
             public readonly List<short[]> On = new List<short[]>(), Off = new List<short[]>(), Other = new List<short[]>();
+            public string OnLabel, OffLabel; // the words you said, as typed at the start
         }
 
         public event Action<Recordings> RecordingsReady; // save them and recalibrate before the test starts
         public event Action Closed;
         public Func<short[], string> Classify;            // "on", "off" or null, using the freshly trained matcher
+        public Func<short[], double> EarlyCutAt;          // seconds into a recording the early cut would release the key, or -1
+        public Func<bool> EarlyAvailable;                 // whether your OFF command can be cut early at all
 
         enum Stage { Intro, Quiet, Collect, Test, Results }
 
@@ -132,7 +135,7 @@ namespace VTT
         {
             onLabel = string.IsNullOrWhiteSpace(onBox.Text) ? "mic on" : onBox.Text.Trim();
             offLabel = string.IsNullOrWhiteSpace(offBox.Text) ? "over and out" : offBox.Text.Trim();
-            data = new Recordings();
+            data = new Recordings { OnLabel = onLabel, OffLabel = offLabel };
             accepted["on"] = new List<float[][]>();
             accepted["off"] = new List<float[][]>();
 
@@ -201,6 +204,11 @@ namespace VTT
                 bool pass = got == expected;
                 if (pass) testPassed++;
                 string what = got == null ? "ignored" : "turned the mic " + got;
+                if (step.Kind == "off" && got == "off" && EarlyCutAt != null)
+                {
+                    double at = EarlyCutAt(pcm);
+                    if (at >= 0) what += string.Format(", cut after {0:0.0} s", at);
+                }
                 testLog.Add((pass ? "✓  " : "✗  ") + "“" + step.Text + "” → " + what);
                 canvas.Flash(pass ? "✓  Correct - " + what : "✗  It " + what, pass ? Theme.Live : Theme.Off);
                 Advance();
@@ -302,6 +310,8 @@ namespace VTT
                              : string.Format("{0} of {1} test phrases handled correctly. Try training again in a quieter spot, keep the mic at the same distance, " +
                                "or adjust Sensitivity in settings.", testPassed, steps.Count), "", 1);
                     canvas.Lines = testLog.ToList();
+                    if (EarlyAvailable != null && !EarlyAvailable())
+                        canvas.Lines.Add("✗  Early cut is off: your OFF command starts like everyday speech. A distinctive start, like “over and out”, lets V.T.T? cut the mic as you begin saying it.");
                     primary.Text = "Done";
                     secondary.Text = "Train again";
                     break;
@@ -421,11 +431,13 @@ namespace VTT
             if (Lines != null)
             {
                 float y = bodyY + 90 * s;
+                var font = F("Segoe UI", 13.5f * s);
                 foreach (var line in Lines)
                 {
+                    float h = g.MeasureString(line, font, (int)(Width - 60 * s)).Height;
                     using (var b = new SolidBrush(line.StartsWith("✓") ? Theme.Live : Theme.Off))
-                        g.DrawString(line, F("Segoe UI", 13.5f * s), b, new RectangleF(30 * s, y, Width - 60 * s, 24 * s), left);
-                    y += 26 * s;
+                        g.DrawString(line, font, b, new RectangleF(30 * s, y, Width - 60 * s, h + 2), left);
+                    y += h + 6 * s;
                 }
             }
 

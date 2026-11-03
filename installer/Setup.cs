@@ -1,4 +1,4 @@
-// V.T.T? Setup: installs VTT.exe (embedded in this file) into a folder you choose, adds shortcuts and an
+﻿// V.T.T? Setup: installs VTT.exe (embedded in this file) into a folder you choose, adds shortcuts and an
 // Apps & features entry, and doubles as the uninstaller (run with /uninstall).
 //
 // Command line:  /S  silent   /dir=PATH   /desktop=0|1   /startmenu=0|1   /startup=0|1   /run=0|1
@@ -20,15 +20,15 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Installer for V.T.T?, voice-activated push-to-talk.")]
 [assembly: AssemblyProduct("V.T.T?")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Shiverbolt. MIT License.")]
-[assembly: AssemblyVersion("1.0.0.2")]
-[assembly: AssemblyFileVersion("1.0.0.2")]
-[assembly: AssemblyInformationalVersion("1.0.0-beta.2")]
+[assembly: AssemblyVersion("1.0.0.3")]
+[assembly: AssemblyFileVersion("1.0.0.3")]
+[assembly: AssemblyInformationalVersion("1.0.0-beta.3")]
 
 namespace VTT.Setup
 {
     static class Info
     {
-        public const string Name = "V.T.T?", Version = "1.0.0-beta.2", DisplayVersion = "1.0 beta 2", Publisher = "Shiverbolt";
+        public const string Name = "V.T.T?", Version = "1.0.0-beta.3", DisplayVersion = "1.0 beta 3", Publisher = "Shiverbolt";
         public const string Url = "https://github.com/Shiverbolt/VTT";
         public const string ExeName = "VTT.exe", UninstallerName = "Uninstall VTT.exe", LicenseName = "LICENSE.txt", ShortcutName = "V.T.T.lnk";
         public const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\VTT";

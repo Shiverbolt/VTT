@@ -328,23 +328,29 @@ namespace VTT
     }
 
     // Splits a continuous audio stream into utterances: bursts of sound with a pause before and after.
+    // While an utterance is in progress it also reports how it starts (Progress), so the OFF command can be
+    // recognised from its first syllable instead of only after it has been said in full.
     class Segmenter
     {
-        const int Frame = 160;                     // 10 ms
-        const int StartFrames = 4, EndSilenceFrames = 35, PreRollFrames = 25, KeepTailFrames = 10;
-        const int MaxFrames = 600, MinFrames = 25;  // 0.25-6 s; longer stretches are searched for the command
+        public const int Frame = 160;              // 10 ms
+        public const int PreRollFrames = 25;       // every utterance starts with 0.25 s of lead-in
+        public const int EarlyFrames = 30;         // first Progress 0.3 s after speech starts...
+        const int EarlyEvery = 10, EarlyUntil = 300; // ...then every 0.1 s, for up to 3 s
+        const int StartFrames = 4, EndSilenceFrames = 35, KeepTailFrames = 10;
+        const int MaxFrames = 600, MinFrames = 25; // utterances keep at most their last 6 s
+        const int AdaptAfterFrames = 800;          // after 8 s without a pause, assume the background got louder
 
-        public event Action<short[]> Utterance;
+        public event Action<short[]> Utterance, Progress;
         public event Action SpeechActivity;
 
         List<short> pending = new List<short>();
         Queue<short[]> preRoll = new Queue<short[]>();
         List<short[]> current = new List<short[]>();
         double noise = 200;
-        bool inSpeech, tooLong;
-        int loudRun, silenceRun;
+        bool inSpeech;
+        int loudRun, silenceRun, sinceOnset;
 
-        public bool InSpeech { get { return inSpeech && !tooLong; } }
+        public bool InSpeech { get { return inSpeech; } }
 
         public void Add(short[] samples)
         {
@@ -367,7 +373,7 @@ namespace VTT
             double rms = Math.Sqrt(sum / f.Length);
             bool loud = rms > Math.Max(noise * 3.5, 150);
 
-            if (!inSpeech || tooLong)
+            if (!inSpeech || sinceOnset > AdaptAfterFrames)
             {
                 // Noise floor follows quiet levels quickly and loud levels slowly.
                 noise = rms < noise ? noise * 0.9 + rms * 0.1 : noise * 0.995 + rms * 0.005;
@@ -381,14 +387,15 @@ namespace VTT
                 if (loudRun >= StartFrames)
                 {
                     inSpeech = true;
-                    tooLong = false;
                     silenceRun = 0;
+                    sinceOnset = 0;
                     current = new List<short[]>(preRoll);
                     preRoll.Clear();
                 }
                 return;
             }
 
+            sinceOnset++;
             if (loud)
             {
                 silenceRun = 0;
@@ -396,24 +403,22 @@ namespace VTT
             }
             else silenceRun++;
 
-            if (!tooLong)
-            {
-                current.Add(f);
-                if (current.Count > MaxFrames + PreRollFrames + EndSilenceFrames) { tooLong = true; current.Clear(); }
-            }
+            current.Add(f);
+            // Long stretches of talking keep only their most recent part, where an OFF command would be.
+            if (current.Count > MaxFrames + PreRollFrames + EndSilenceFrames) current.RemoveAt(0);
+
+            if (Progress != null && sinceOnset >= EarlyFrames && sinceOnset <= EarlyUntil &&
+                (sinceOnset - EarlyFrames) % EarlyEvery == 0 && silenceRun < EndSilenceFrames)
+                Progress(current.SelectMany(x => x).ToArray());
 
             if (silenceRun >= EndSilenceFrames)
             {
                 inSpeech = false;
                 loudRun = 0;
-                if (!tooLong)
-                {
-                    int keep = current.Count - EndSilenceFrames + KeepTailFrames;
-                    if (keep - PreRollFrames >= MinFrames && Utterance != null)
-                        Utterance(current.Take(keep).SelectMany(x => x).ToArray());
-                }
+                int keep = current.Count - EndSilenceFrames + KeepTailFrames;
+                if (keep - PreRollFrames >= MinFrames && Utterance != null)
+                    Utterance(current.Take(keep).SelectMany(x => x).ToArray());
                 current = new List<short[]>();
-                tooLong = false;
             }
         }
     }
@@ -599,13 +604,50 @@ namespace VTT
     class VoiceMatcher
     {
         public const int MaxSamples = 10, MaxOther = 20;
-        public readonly Dictionary<string, List<float[][]>> Templates = new Dictionary<string, List<float[][]>> {
-            { "on", new List<float[][]>() }, { "off", new List<float[][]>() }
+        // How much audio the early OFF check first looks at: the lead-in plus 0.3 s of speech.
+        public const int EarlySamples = (Segmenter.PreRollFrames + Segmenter.EarlyFrames) * Segmenter.Frame;
+
+        readonly Dictionary<string, List<short[]>> pcm = new Dictionary<string, List<short[]>> {
+            { "on", new List<short[]>() }, { "off", new List<short[]>() }, { "other", new List<short[]>() }
         };
-        public readonly List<float[][]> Other = new List<float[][]>();
+        readonly Dictionary<string, List<float[][]>> feats = new Dictionary<string, List<float[][]>> {
+            { "on", new List<float[][]>() }, { "off", new List<float[][]>() }, { "other", new List<float[][]>() }
+        };
         readonly Dictionary<string, double> threshold = new Dictionary<string, double>();
+        readonly Dictionary<string, float[][]> prefixCache = new Dictionary<string, float[][]>();
+        double earlyThreshold = double.NaN;
 
         public bool Ready { get { return threshold.ContainsKey("on") && threshold.ContainsKey("off"); } }
+        public bool EarlyReady { get { return IsFinite(earlyThreshold); } }
+        public int Count(string kind) { return pcm[kind].Count; }
+        public int LongestOff { get { return pcm["off"].Count == 0 ? 0 : pcm["off"].Max(p => p.Length); } }
+        int LongestCommand { get { return pcm["on"].Concat(pcm["off"]).Select(p => p.Length).DefaultIfEmpty(0).Max(); } }
+
+        public void Add(string kind, short[] samples) { pcm[kind].Add(samples); feats[kind].Add(Features.Compute(samples)); }
+        public void RemoveOldest(string kind) { pcm[kind].RemoveAt(0); feats[kind].RemoveAt(0); }
+        public void Clear(string kind) { pcm[kind].Clear(); feats[kind].Clear(); }
+        public void ClearAll() { foreach (var k in pcm.Keys) Clear(k); }
+
+        // The ways a sound is compared with the commands: as a whole, and for long stretches of talking also
+        // just its start and just its end (each re-normalised on its own), where a command usually sits.
+        List<float[][]> Views(short[] samples)
+        {
+            var views = new List<float[][]> { Features.Compute(samples) };
+            int window = (int)(LongestCommand * 1.5) + MicCapture.Rate / 5;
+            if (LongestCommand > 0 && samples.Length > window + MicCapture.Rate / 10)
+            {
+                views.Add(Features.Compute(samples.Skip(samples.Length - window).ToArray()));
+                views.Add(Features.Compute(samples.Take(window).ToArray()));
+            }
+            return views;
+        }
+
+        static double BestOver(List<float[][]> views, List<float[][]> templates)
+        {
+            double best = double.PositiveInfinity;
+            foreach (var v in views) best = Math.Min(best, Best(v, templates, -1));
+            return best;
+        }
 
         // Distance from an utterance to a template; a much longer utterance is searched for the template inside it.
         public static double Dist(float[][] utterance, float[][] template)
@@ -626,31 +668,74 @@ namespace VTT
         public void Recalibrate()
         {
             threshold.Clear();
-            foreach (var cmd in Templates.Keys)
+            prefixCache.Clear();
+            var views = new Dictionary<short[], List<float[][]>>();
+            Func<short[], List<float[][]>> viewsOf = s => { List<float[][]> v; if (!views.TryGetValue(s, out v)) views[s] = v = Views(s); return v; };
+            foreach (var cmd in new[] { "on", "off" })
             {
-                var own = Templates[cmd];
+                var own = feats[cmd];
                 if (own.Count == 0) continue;
                 var pos = new List<double>();
                 if (own.Count >= 2)
                     for (int i = 0; i < own.Count; i++) pos.Add(Best(own[i], own, i)); // leave-one-out
                 var neg = new List<double>();
-                foreach (var n in Other.Concat(Templates.Where(kv => kv.Key != cmd).SelectMany(kv => kv.Value)))
-                    neg.Add(Best(n, own, -1));
-                double t = PickThreshold(pos.Where(IsFinite).ToList(), neg.Where(IsFinite).ToList());
+                foreach (var n in pcm["other"].Concat(pcm[cmd == "on" ? "off" : "on"]))
+                    neg.Add(BestOver(viewsOf(n), own));
+                double t = PickThreshold(pos.Where(IsFinite).ToList(), neg.Where(IsFinite).ToList(), 0.6);
                 if (IsFinite(t)) threshold[cmd] = t;
             }
+            CalibrateEarly();
+        }
+
+        // The early cut only switches on when the start of your OFF command is clearly unlike the start of
+        // everything else you said in training; a false cut would clip your speech, so it stays strict.
+        void CalibrateEarly()
+        {
+            earlyThreshold = double.NaN;
+            var offs = pcm["off"];
+            var others = pcm["other"].Concat(pcm["on"]).ToList();
+            if (offs.Count < 3 || others.Count < 3) return;
+            var offPrefixes = Enumerable.Range(0, offs.Count).Select(i => PrefixFeatures(i, EarlySamples)).ToList();
+            var pos = new List<double>();
+            for (int i = 0; i < offPrefixes.Count; i++) pos.Add(Best(offPrefixes[i], offPrefixes, i));
+            var neg = others.Select(o => Best(Features.Compute(o.Take(EarlySamples).ToArray()), offPrefixes, -1)).ToList();
+            pos = pos.Where(IsFinite).ToList();
+            neg = neg.Where(IsFinite).ToList();
+            if (pos.Count < 2 || neg.Count == 0 || pos.Max() >= neg.Min()) return;
+            earlyThreshold = pos.Max() + (neg.Min() - pos.Max()) * 0.4;
+        }
+
+        float[][] PrefixFeatures(int offIndex, int length)
+        {
+            var src = pcm["off"][offIndex];
+            int n = Math.Min(length, src.Length);
+            string key = offIndex + ":" + n;
+            float[][] f;
+            if (!prefixCache.TryGetValue(key, out f)) prefixCache[key] = f = Features.Compute(src.Take(n).ToArray());
+            return f;
+        }
+
+        // How much the start of a sound in progress resembles the start of your OFF command (under 1 = it does).
+        public double EarlyScore(short[] soFar)
+        {
+            if (!EarlyReady) return double.PositiveInfinity;
+            var f = Features.Compute(soFar);
+            double best = double.PositiveInfinity;
+            for (int i = 0; i < pcm["off"].Count; i++) best = Math.Min(best, Features.Distance(f, PrefixFeatures(i, soFar.Length)));
+            return best / earlyThreshold;
         }
 
         static bool IsFinite(double d) { return !double.IsInfinity(d) && !double.IsNaN(d); }
 
-        static double PickThreshold(List<double> pos, List<double> neg)
+        // lean: where to cut between your repeats (0) and everything else (1) when they don't overlap.
+        static double PickThreshold(List<double> pos, List<double> neg, double lean)
         {
             if (pos.Count == 0) return neg.Count > 0 ? neg.Min() * 0.6 : double.NaN; // one sample: stay strict
             double maxPos = pos.Max();
             if (neg.Count == 0) return maxPos * 1.4;
             double minNeg = neg.Min();
             // Repeats are judged against one fewer sample than real use, so lean a little toward accepting.
-            if (maxPos < minNeg) return maxPos + (minNeg - maxPos) * 0.6;
+            if (maxPos < minNeg) return maxPos + (minNeg - maxPos) * lean;
             // Overlap: pick the cut with the fewest mistakes, counting a false trigger as worse than a miss.
             var cuts = pos.Concat(neg).OrderBy(x => x).ToList();
             double best = cuts[0] * 0.99, bestCost = pos.Count;
@@ -665,10 +750,11 @@ namespace VTT
 
         // A score is the distance to the closest sample divided by the learned threshold, so under 1 means
         // "sounds like this command". Sensitivity scales that cut-off. Returns "on", "off" or null.
-        public string Match(float[][] f, double sensitivity, out double onScore, out double offScore)
+        public string Match(short[] samples, double sensitivity, out double onScore, out double offScore)
         {
-            onScore = Score("on", f);
-            offScore = Score("off", f);
+            var views = Views(samples);
+            onScore = Score("on", views);
+            offScore = Score("off", views);
             string best = onScore <= offScore ? "on" : "off";
             double bestScore = Math.Min(onScore, offScore), otherScore = Math.Max(onScore, offScore);
             if (bestScore > sensitivity) return null;
@@ -676,11 +762,11 @@ namespace VTT
             return best;
         }
 
-        public double Score(string cmd, float[][] f)
+        double Score(string cmd, List<float[][]> views)
         {
             double t;
             if (!threshold.TryGetValue(cmd, out t)) return double.PositiveInfinity;
-            return Best(f, Templates[cmd], -1) / t;
+            return BestOver(views, feats[cmd]) / t;
         }
     }
 

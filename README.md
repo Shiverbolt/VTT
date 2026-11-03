@@ -1,4 +1,4 @@
-# V.T.T?
+﻿# V.T.T?
 
 **Voice-activated push-to-talk for Windows.** Say a command and V.T.T? holds your push-to-talk key down for you; say another and it lets go. No hands, no hotkeys, no always-open mic.
 
@@ -8,12 +8,14 @@
   <img src="docs/screenshot-settings.png" width="260" alt="Settings">
 </p>
 
-> **1.0 beta 2** - works, but expect rough edges. Please [open an issue](https://github.com/Shiverbolt/VTT/issues) if something misbehaves.
+> **1.0 beta 3** - works, but expect rough edges. Please [open an issue](https://github.com/Shiverbolt/VTT/issues) if something misbehaves.
 
 ## Features
 
 - **Your own voice commands** - say anything (any language, any word) as the ON and OFF commands. A 2-minute **voice trainer** learns your voice and what to ignore, so other people and game audio rarely trigger it.
-- **Works mid-sentence** - "okay, mic on" counts; V.T.T? finds your command inside longer speech.
+- **Works mid-sentence** - "okay, mic on" counts, and so does "…let's regroup, over and out" at the end of a long stretch of talking.
+- **Your OFF command stays (mostly) private** - V.T.T? recognises it from its first syllable and lets go of the key right away, so the other side hears about 0.3 s of it instead of the whole phrase. If it was a false alarm, the mic comes back within a fraction of a second.
+- **Double-checked by speech recognition** - the words of your commands are also listened for, so borderline matches still count.
 - **Or spoken phrases** - type phrases like `mic on` / `over and out` and let the built-in Windows speech recognizer listen for them.
 - **Works with anything that has push-to-talk** - Discord, TeamSpeak, Mumble, OBS, games. V.T.T? simply holds the key you choose (default **F13**, a key no keyboard has, so it never clashes with typing).
 - **Live voice spectrum** around an animated orb, so you can see it hearing you.
@@ -23,7 +25,7 @@
 
 ## Get started
 
-1. Download `VTT-Setup-1.0.0-beta.2.exe` from the [latest release](https://github.com/Shiverbolt/VTT/releases) and run it. The default folder (`%LOCALAPPDATA%\Programs\VTT`) needs no admin rights; pick another with **Browse**.
+1. Download `VTT-Setup-1.0.0-beta.3.exe` from the [latest release](https://github.com/Shiverbolt/VTT/releases) and run it. The default folder (`%LOCALAPPDATA%\Programs\VTT`) needs no admin rights; pick another with **Browse**.
    Prefer no installer? Download the portable `VTT.exe` instead and just run it.
 2. In Discord (or your app), switch to **Push to Talk** and click the keybind box.
 3. In V.T.T?, open **Settings** (gear icon) and click **Press the key in 3 seconds** - your app records the key.
@@ -38,6 +40,7 @@ After each sound, the line under the status shows how close it was to each comma
 
 - Real commands missed? Raise **Sensitivity**, or train again in your usual room with your usual mic.
 - Random sounds triggering it? Lower **Sensitivity**.
+- **Early cut** needs an OFF command whose *start* sounds unlike your everyday speech (e.g. "over and out" rather than "okay stop"); the trainer tells you if yours qualifies. Rather not say an OFF command at all? Set **Auto-off after silence** and just stop talking.
 
 ## Privacy
 
@@ -52,17 +55,17 @@ Recordings and settings live only in `%APPDATA%\VTT` (`samples\*.wav`, `settings
 The installer and `VTT.exe` are signed with a **self-signed** certificate (published as `VTT-codesign.cer` with each release), so Windows still shows *"Unknown publisher"* and SmartScreen may warn on first run (*More info → Run anyway*). The signature lets you confirm the files weren't altered; compare their SHA-256 with `SHA256SUMS.txt` in the release:
 
 ```powershell
-Get-FileHash .\VTT-Setup-1.0.0-beta.2.exe -Algorithm SHA256
+Get-FileHash .\VTT-Setup-1.0.0-beta.3.exe -Algorithm SHA256
 ```
 
 Some games with anti-cheat ignore simulated key presses; in those, use the game's open-mic mode and V.T.T? with your voice chat app instead.
 
 ## Installer options
 
-`VTT-Setup-1.0.0-beta.2.exe` also runs unattended:
+`VTT-Setup-1.0.0-beta.3.exe` also runs unattended:
 
 ```powershell
-.\VTT-Setup-1.0.0-beta.2.exe /S /dir="D:\Apps\VTT" /desktop=0 /startmenu=1 /startup=0 /run=1
+.\VTT-Setup-1.0.0-beta.3.exe /S /dir="D:\Apps\VTT" /desktop=0 /startmenu=1 /startup=0 /run=1
 & "$env:LOCALAPPDATA\Programs\VTT\Uninstall VTT.exe" /uninstall /S /removedata=1
 ```
 

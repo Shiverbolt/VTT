@@ -110,13 +110,14 @@ static class AudioTests
         var m = new VoiceMatcher();
         foreach (int r in new[] { -2, -1, 0, 1, 2, 0 })
         {
-            foreach (var u in Segment(Say("mic on", voice, r))) m.Templates["on"].Add(Features.Compute(u));
-            foreach (var u in Segment(Say("over and out", voice, r))) m.Templates["off"].Add(Features.Compute(u));
+            foreach (var u in Segment(Say("mic on", voice, r))) m.Add("on", u);
+            foreach (var u in Segment(Say("over and out", voice, r))) m.Add("off", u);
         }
         foreach (var other in new[] { "Can you hear me okay?", "Let's push up together", "Good game everyone", "Wait for me", "Nice shot", "mic", "over" })
-            foreach (var u in Segment(Say(other, voice, 0))) m.Other.Add(Features.Compute(u));
+            foreach (var u in Segment(Say(other, voice, 0))) m.Add("other", u);
         m.Recalibrate();
         Check(m.Ready, "matcher calibrated from training data");
+        Check(m.EarlyReady, "early cut available for \"over and out\"");
         var cases = new[] {
             Tuple.Create("mic on", 3, "on"), Tuple.Create("mic on", -3, "on"), Tuple.Create("over and out", 3, "off"), Tuple.Create("over and out", -3, "off"),
             Tuple.Create("okay, mic on", 0, "on"), Tuple.Create("alright, over and out", 0, "off"),
@@ -127,11 +128,59 @@ static class AudioTests
         {
             string got = null;
             double on = 0, off = 0;
-            foreach (var u in Segment(Say(t.Item1, voice, t.Item2))) got = m.Match(Features.Compute(u), 1.0, out on, out off) ?? got;
+            foreach (var u in Segment(Say(t.Item1, voice, t.Item2))) got = m.Match(u, 1.0, out on, out off) ?? got;
             Check(got == t.Item3, string.Format("\"{0}\" rate {1} -> {2} (on {3:0.00}, off {4:0.00})", t.Item1, t.Item2, got ?? "nothing", on, off));
+        }
+
+        // A command at the end of a long stretch of talking with no pause (over 6 s) is still caught.
+        {
+            var talk = Say("so I went around the back and there were three of them waiting by the stairs and I think we should regroup now, over and out", voice, 0);
+            string got = null;
+            double on = 0, off = 0;
+            foreach (var u in Segment(talk)) got = m.Match(u, 1.0, out on, out off) ?? got;
+            Check(got == "off", string.Format("OFF at the end of {0:0.0} s of talking -> {1} (off {2:0.00})", talk.Length / 16000.0 - 2, got ?? "nothing", off));
+        }
+
+        // Early cut, run exactly as the app does: release the key as soon as the start sounds like OFF,
+        // take it back if the rest doesn't, and let the full match confirm.
+        var early = new[] {
+            Tuple.Create("over and out", true), Tuple.Create("over and out", true), Tuple.Create("I'm going to reload now", false),
+            Tuple.Create("okay, let's go", false), Tuple.Create("over here, follow me to the left", false), Tuple.Create("on my way", false),
+            Tuple.Create("mic on", false) };
+        int rate = 0;
+        foreach (var t in early)
+        {
+            var r = SimulateEarlyCut(m, Say(t.Item1, voice, rate));
+            rate = rate == 0 ? 2 : 0;
+            bool ok = t.Item2 ? r.Item1 >= 0 && r.Item1 <= 0.5 && r.Item3 : !r.Item3 && (r.Item1 < 0 || r.Item2 - r.Item1 <= 0.6);
+            string what = r.Item1 < 0 ? "never cut" : string.Format("cut at {0:0.00} s", r.Item1) + (r.Item3 ? ", confirmed OFF" : string.Format(", resumed at {0:0.00} s", r.Item2));
+            Check(ok, string.Format("early cut: \"{0}\" -> {1}", t.Item1, what));
         }
 
         Console.WriteLine(failures == 0 ? "All tests passed" : failures + " test(s) failed");
         return failures == 0 ? 0 : 1;
+    }
+
+    // Returns (seconds after speech start when the key was released or -1, seconds when it was taken back, confirmed as OFF).
+    static Tuple<double, double, bool> SimulateEarlyCut(VoiceMatcher m, short[] audio)
+    {
+        var seg = new Segmenter();
+        bool cut = false, blocked = false, confirmed = false;
+        double cutAt = -1, resumedAt = -1;
+        int lead = Segmenter.PreRollFrames * Segmenter.Frame;
+        seg.Progress += p => {
+            if (blocked) return;
+            double s = m.EarlyScore(p), at = (p.Length - lead) / 16000.0;
+            if (!cut && s < 1) { cut = true; cutAt = at; }
+            else if (cut && (s > 1.3 || p.Length > m.LongestOff * 1.3)) { cut = false; blocked = true; resumedAt = at; }
+        };
+        seg.Utterance += u => {
+            double on, off;
+            if (cut) { confirmed = m.Match(u, 1.0, out on, out off) == "off"; if (!confirmed) resumedAt = (u.Length - lead) / 16000.0; }
+            cut = false; blocked = false;
+        };
+        foreach (var c in Chunks(audio, 400)) seg.Add(c);
+        seg.Add(new short[16000]);
+        return Tuple.Create(cutAt, resumedAt, confirmed);
     }
 }

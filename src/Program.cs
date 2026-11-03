@@ -14,16 +14,16 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Voice-activated push-to-talk: say a command to hold your push-to-talk key, say another to release it.")]
 [assembly: AssemblyProduct("V.T.T?")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Shiverbolt. MIT License.")]
-[assembly: AssemblyVersion("1.0.0.2")]
-[assembly: AssemblyFileVersion("1.0.0.2")]
-[assembly: AssemblyInformationalVersion("1.0.0-beta.2")]
+[assembly: AssemblyVersion("1.0.0.3")]
+[assembly: AssemblyFileVersion("1.0.0.3")]
+[assembly: AssemblyInformationalVersion("1.0.0-beta.3")]
 
 namespace VTT
 {
     static class AppInfo
     {
         public const string Name = "V.T.T?";
-        public const string Version = "1.0 beta 2";
+        public const string Version = "1.0 beta 3";
         public const string RepoUrl = "https://github.com/Shiverbolt/VTT";
         public static readonly string DataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VTT");
         public static readonly string SamplesFolder = Path.Combine(DataFolder, "samples");
@@ -74,6 +74,8 @@ namespace VTT
         public bool Sounds = true;
         public bool FilterSpeech = true;
         public bool AskDeleteOnExit = true;
+        public bool EarlyCut = true;     // release the key as soon as you start saying the OFF command
+        public bool SpeechAssist = true; // Windows speech recognition confirms borderline voice-sample matches
         public string InputDevice = "", OutputDevice = ""; // empty = Windows default
 
         public static string FilePath { get { return Path.Combine(AppInfo.DataFolder, "settings.txt"); } }
@@ -98,6 +100,8 @@ namespace VTT
                         case "confidence": s.MinConfidence = int.Parse(v); break;
                         case "sensitivity": s.Sensitivity = int.Parse(v); break;
                         case "askonexit": s.AskDeleteOnExit = bool.Parse(v); break;
+                        case "earlycut": s.EarlyCut = bool.Parse(v); break;
+                        case "speechassist": s.SpeechAssist = bool.Parse(v); break;
                         case "autooff": s.AutoOffSeconds = int.Parse(v); break;
                         case "sounds": s.Sounds = bool.Parse(v); break;
                         case "filter": s.FilterSpeech = bool.Parse(v); break;
@@ -119,6 +123,7 @@ namespace VTT
                     "mode=" + (UseRecordings ? "recordings" : "phrases"), "on=" + OnPhrases, "off=" + OffPhrases,
                     "key=" + Key, "confidence=" + MinConfidence, "sensitivity=" + Sensitivity,
                     "autooff=" + AutoOffSeconds, "sounds=" + Sounds, "filter=" + FilterSpeech, "askonexit=" + AskDeleteOnExit,
+                    "earlycut=" + EarlyCut, "speechassist=" + SpeechAssist,
                     "input=" + InputDevice, "output=" + OutputDevice });
             }
             catch { }

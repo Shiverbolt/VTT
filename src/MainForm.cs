@@ -46,6 +46,14 @@ namespace VTT
         // state
         string recordTarget;
         bool live, listening = true, loading;
+        // Early cut: the key was released because you started saying OFF; "live" stays true until the full
+        // match confirms it. earlyBlocked stops a cut from flapping on and off within one utterance.
+        bool tentativeOff, earlyBlocked;
+        int lastProgressLength;
+        // Speech-recognition double-check: the latest evidence from each detector, fused when they agree.
+        string srCommand;
+        DateTime srTime = DateTime.MinValue, sampleTime = DateTime.MinValue;
+        double sampleOn = double.PositiveInfinity, sampleOff = double.PositiveInfinity;
         Keys heldKey;
         DateTime lastSpeech = DateTime.Now;
         float slide;
@@ -58,7 +66,7 @@ namespace VTT
         ComboBox modeBox, keyBox, inputBox, outputBox;
         TextBox onBox, offBox;
         Stepper confStep, sensStep, autoOffStep;
-        Toggle filterToggle, soundsToggle, askExitToggle;
+        Toggle filterToggle, soundsToggle, askExitToggle, earlyToggle, assistToggle;
         TrainerPage trainer;
         readonly bool startInTray;
         Control voicePanel, phrasePanel;
@@ -67,7 +75,7 @@ namespace VTT
         readonly List<LevelMeter> meters = new List<LevelMeter>();
         readonly List<Toggle> toggles = new List<Toggle>();
         NotifyIcon tray;
-        Timer frameTimer, recordTimer, applyTimer;
+        Timer frameTimer, recordTimer, applyTimer, abortTimer;
         readonly Stopwatch clock = new Stopwatch();
         readonly float[] rawBands = new float[SpectrumAnalyzer.Bands];
 
@@ -101,8 +109,10 @@ namespace VTT
             trainer.Closed += CloseTrainer;
             trainer.Classify = pcm => {
                 double on, off;
-                return matcher.Match(Features.Compute(pcm), settings.Sensitivity / 100.0, out on, out off);
+                return matcher.Match(pcm, settings.Sensitivity / 100.0, out on, out off);
             };
+            trainer.EarlyCutAt = EarlyCutAt;
+            trainer.EarlyAvailable = () => matcher.EarlyReady;
             Controls.Add(trainer);
             Controls.Add(settingsPanel);
             Controls.Add(view);
@@ -122,11 +132,14 @@ namespace VTT
             frameTimer.Tick += delegate { Frame(); };
             recordTimer = new Timer { Interval = 8000 };
             recordTimer.Tick += delegate { StopRecording("Didn't hear anything. Try recording again."); };
+            abortTimer = new Timer { Interval = 700 };
+            abortTimer.Tick += delegate { abortTimer.Stop(); AbortCut(); };
             applyTimer = new Timer { Interval = 450 };
             applyTimer.Tick += delegate { applyTimer.Stop(); ApplySettings(); };
 
             segmenter.SpeechActivity += () => lastSpeech = DateTime.Now;
             segmenter.Utterance += u => { try { BeginInvoke(new Action(() => OnUtterance(u))); } catch { } };
+            segmenter.Progress += p => { try { BeginInvoke(new Action(() => OnProgress(p))); } catch { } };
 
             heldKey = settings.Key;
             LoadSamples();
@@ -239,6 +252,12 @@ namespace VTT
             sensStep.ValueChanged += delegate { ScheduleApply(); };
             vp.Controls.Add(Row("Sensitivity", sensStep));
             vp.Controls.Add(Note("Higher catches commands more easily; lower ignores more. Missed commands? Raise it. Random triggers? Lower it."));
+            earlyToggle = NewToggle(settings.EarlyCut);
+            vp.Controls.Add(Row("Cut the mic early on OFF", earlyToggle));
+            vp.Controls.Add(Note("Releases the key as soon as you start saying your OFF command, so others hear only its first syllable. Needs a trained voice."));
+            assistToggle = NewToggle(settings.SpeechAssist);
+            vp.Controls.Add(Row("Double-check with speech recognition", assistToggle));
+            vp.Controls.Add(Note("Also listens for the words of your commands, so near-misses still count."));
             voicePanel = vp;
             content.Controls.Add(vp);
 
@@ -421,6 +440,8 @@ namespace VTT
             settings.MinConfidence = (int)confStep.Value;
             settings.Sensitivity = (int)sensStep.Value;
             settings.AskDeleteOnExit = askExitToggle.Checked;
+            settings.EarlyCut = earlyToggle.Checked;
+            settings.SpeechAssist = assistToggle.Checked;
             settings.FilterSpeech = filterToggle.Checked;
             settings.Key = (Keys)keyBox.SelectedItem;
             settings.AutoOffSeconds = (int)autoOffStep.Value;
@@ -431,7 +452,7 @@ namespace VTT
 
             if (settings.Key != heldKey)
             {
-                if (live) { KeySender.Send(heldKey, false); KeySender.Send(settings.Key, true); }
+                if (KeyIsDown) { KeySender.Send(heldKey, false); KeySender.Send(settings.Key, true); }
                 heldKey = settings.Key;
             }
             if (settings.InputDevice != oldInput) RestartMic();
@@ -552,13 +573,14 @@ namespace VTT
 
         int OutputIndex() { return settings.OutputDevice == "" ? -1 : outputs.IndexOf(settings.OutputDevice); }
 
-        // Runs the speech recognizer only when listening in phrase mode; reloads grammars when asked.
+        // Runs the speech recognizer while listening in phrase mode, or as the double-check for voice samples;
+        // reloads grammars when asked.
         void SyncEngine(bool reload)
         {
             if (engine == null) return;
             reloadPending |= reload;
             if (engineStopping) return;
-            bool want = listening && !settings.UseRecordings;
+            bool want = listening && (!settings.UseRecordings || settings.SpeechAssist);
             if (engineRunning && (reloadPending || !want))
             {
                 engineStopping = true;
@@ -595,9 +617,18 @@ namespace VTT
 
         void OnRecognized(RecognitionResult result)
         {
-            if (result.Grammar != commandGrammar || recordTarget != null || settings.UseRecordings || !listening) return;
+            if (result.Grammar != commandGrammar || recordTarget != null || trainer.Visible || !listening) return;
             string text = result.Text.ToLowerInvariant();
             int conf = (int)Math.Round(result.Confidence * 100);
+            if (settings.UseRecordings)
+            {
+                // Double-check mode: only evidence, acted on when the voice-sample score roughly agrees.
+                if (!settings.SpeechAssist || conf < settings.MinConfidence) return;
+                srCommand = onSet.Contains(text) ? "on" : offSet.Contains(text) ? "off" : null;
+                srTime = DateTime.Now;
+                Fuse();
+                return;
+            }
             if (conf < settings.MinConfidence)
             {
                 SetHint(string.Format("Heard “{0}” but only {1}% sure", text, conf));
@@ -610,17 +641,96 @@ namespace VTT
 
         void OnUtterance(short[] pcm)
         {
+            earlyBlocked = false;
+            lastProgressLength = 0;
             if (trainer.Visible) { trainer.OnUtterance(pcm); return; }
             if (recordTarget != null) { SaveSample(recordTarget, pcm); return; }
-            if (!listening || !settings.UseRecordings) return;
+            if (!listening || !settings.UseRecordings) { AbortCut(); return; }
             // Matching needs both commands: their distance from each other calibrates what counts as a match.
-            if (!matcher.Ready) return;
+            if (!matcher.Ready) { AbortCut(); return; }
             double on, off, cutoff = settings.Sensitivity / 100.0;
-            string cmd = matcher.Match(Features.Compute(pcm), cutoff, out on, out off);
+            string cmd = matcher.Match(pcm, cutoff, out on, out off);
             SetHint(string.Format("on {0}  ·  off {1}  ·  needs under {2:0.00}{3}",
                 Fmt(on), Fmt(off), cutoff, cmd == null ? "" : "  →  mic " + cmd));
-            if (cmd == "on") SetLive(true, "voice");
-            else if (cmd == "off") SetLive(false, "voice");
+            if (cmd != null)
+            {
+                srCommand = null; // used up
+                SetLive(cmd == "on", "voice");
+                return;
+            }
+            sampleOn = on;
+            sampleOff = off;
+            sampleTime = DateTime.Now;
+            Fuse();
+            if (!tentativeOff) return;
+            // The start sounded like OFF but the whole thing didn't quite match. If it was close and speech
+            // recognition may still confirm it, wait a moment before taking the cut back.
+            if (settings.SpeechAssist && engineRunning && off < cutoff * 1.6) { abortTimer.Stop(); abortTimer.Start(); }
+            else AbortCut();
+        }
+
+        // While you are talking with the mic live: if the start of what you're saying sounds like your OFF
+        // command, let go of the key right away; if the rest turns out to be something else, press it again.
+        void OnProgress(short[] soFar)
+        {
+            if (soFar.Length < lastProgressLength) earlyBlocked = false; // a new utterance
+            lastProgressLength = soFar.Length;
+            if (!live || earlyBlocked || !listening || !settings.UseRecordings || !settings.EarlyCut || !matcher.EarlyReady ||
+                trainer.Visible || recordTarget != null) return;
+            double score = matcher.EarlyScore(soFar);
+            if (!tentativeOff)
+            {
+                if (score < 1)
+                {
+                    tentativeOff = true;
+                    KeySender.Send(heldKey, false);
+                    UpdateStatus();
+                }
+            }
+            else if (score > 1.3 || soFar.Length > matcher.LongestOff * 1.3)
+            {
+                AbortCut();
+                earlyBlocked = true;
+            }
+        }
+
+        // Takes back an early cut: the mic goes live again (silently, with no sound).
+        void AbortCut()
+        {
+            if (!tentativeOff) return;
+            tentativeOff = false;
+            if (live) KeySender.Send(heldKey, true);
+            UpdateStatus();
+        }
+
+        // Speech recognition and voice samples each saw something within 1.5 s of each other: act if the
+        // recognizer heard a command and its voice-sample score was close (up to 1.6x the usual cut-off).
+        void Fuse()
+        {
+            var now = DateTime.Now;
+            if (srCommand == null || (now - srTime).TotalSeconds > 1.5 || (now - sampleTime).TotalSeconds > 1.5) return;
+            double mine = srCommand == "on" ? sampleOn : sampleOff, other = srCommand == "on" ? sampleOff : sampleOn;
+            if (mine > settings.Sensitivity / 100.0 * 1.6 || mine >= other) return;
+            string cmd = srCommand;
+            srCommand = null;
+            sampleTime = DateTime.MinValue;
+            SetHint(string.Format("Heard “{0}” (confirmed by speech recognition)", cmd == "on" ? Settings.Split(settings.OnPhrases).FirstOrDefault() : Settings.Split(settings.OffPhrases).FirstOrDefault()));
+            SetLive(cmd == "on", "speech");
+        }
+
+        // For the trainer's test: how many seconds into this recording the early cut would let go of the key
+        // (and stay cut), or -1 if it wouldn't.
+        double EarlyCutAt(short[] pcm)
+        {
+            if (!matcher.EarlyReady) return -1;
+            int lead = Segmenter.PreRollFrames * Segmenter.Frame, step = 10 * Segmenter.Frame;
+            for (int n = VoiceMatcher.EarlySamples; n <= pcm.Length; n += step)
+            {
+                double s = matcher.EarlyScore(pcm.Take(n).ToArray());
+                if (s < 1) return (n - lead) / (double)MicCapture.Rate;
+                if (n > matcher.LongestOff * 1.3) break;
+            }
+            return -1;
         }
 
         static string Fmt(double score) { return double.IsInfinity(score) ? "–" : score.ToString("0.00"); }
@@ -629,8 +739,8 @@ namespace VTT
 
         void LoadSamples()
         {
-            foreach (var cmd in Commands) { matcher.Templates[cmd].Clear(); sampleFiles[cmd].Clear(); }
-            matcher.Other.Clear();
+            matcher.ClearAll();
+            foreach (var cmd in Commands) sampleFiles[cmd].Clear();
             if (Directory.Exists(AppInfo.SamplesFolder))
             {
                 foreach (var cmd in Commands)
@@ -638,14 +748,14 @@ namespace VTT
                     {
                         try
                         {
-                            matcher.Templates[cmd].Add(Features.Compute(Wav.Read(file)));
+                            matcher.Add(cmd, Wav.Read(file));
                             sampleFiles[cmd].Add(file);
                         }
                         catch { }
                     }
                 foreach (var file in Directory.GetFiles(AppInfo.SamplesFolder, "other_*.wav"))
                 {
-                    try { matcher.Other.Add(Features.Compute(Wav.Read(file))); } catch { }
+                    try { matcher.Add("other", Wav.Read(file)); } catch { }
                 }
             }
             matcher.Recalibrate();
@@ -685,11 +795,26 @@ namespace VTT
                 for (int i = 0; i < g.Item2.Count; i++)
                     Wav.Write(Path.Combine(AppInfo.SamplesFolder, string.Format("{0}_{1}_{2:00}.wav", g.Item1, stamp, i)), g.Item2[i]);
             LoadSamples();
+            // The words you said become the first phrases, so the speech-recognition double-check knows them.
+            settings.OnPhrases = WithFirst(rec.OnLabel, settings.OnPhrases);
+            settings.OffPhrases = WithFirst(rec.OffLabel, settings.OffPhrases);
+            loading = true;
+            onBox.Text = settings.OnPhrases;
+            offBox.Text = settings.OffPhrases;
             if (modeBox.SelectedIndex != 0) modeBox.SelectedIndex = 0;
+            loading = false;
             settings.UseRecordings = true;
             settings.Save();
-            SyncEngine(false);
+            SyncEngine(true);
             UpdateStatus();
+        }
+
+        static string WithFirst(string phrase, string phrases)
+        {
+            var list = Settings.Split(phrases);
+            phrase = (phrase ?? "").Trim().ToLowerInvariant();
+            if (phrase.Length > 0) { list.Remove(phrase); list.Insert(0, phrase); }
+            return string.Join(", ", list);
         }
 
         static bool HasRecordings()
@@ -702,8 +827,8 @@ namespace VTT
         {
             if (Directory.Exists(AppInfo.SamplesFolder))
                 foreach (var f in Directory.GetFiles(AppInfo.SamplesFolder, "*.wav")) TryDelete(f);
-            foreach (var cmd in Commands) { matcher.Templates[cmd].Clear(); sampleFiles[cmd].Clear(); }
-            matcher.Other.Clear();
+            matcher.ClearAll();
+            foreach (var cmd in Commands) sampleFiles[cmd].Clear();
             matcher.Recalibrate();
             UpdateSampleLabels();
         }
@@ -741,6 +866,8 @@ namespace VTT
             autoOffStep.Set(settings.AutoOffSeconds);
             soundsToggle.Checked = settings.Sounds;
             askExitToggle.Checked = settings.AskDeleteOnExit;
+            earlyToggle.Checked = settings.EarlyCut;
+            assistToggle.Checked = settings.SpeechAssist;
             RefreshDevices();
             UpdateModePanels();
             loading = false;
@@ -793,12 +920,12 @@ namespace VTT
             var file = Path.Combine(AppInfo.SamplesFolder, cmd + "_" + DateTime.Now.ToString("yyyyMMddHHmmssfff") + ".wav");
             Wav.Write(file, pcm);
             sampleFiles[cmd].Add(file);
-            matcher.Templates[cmd].Add(features);
+            matcher.Add(cmd, pcm);
             while (sampleFiles[cmd].Count > VoiceMatcher.MaxSamples)
             {
                 TryDelete(sampleFiles[cmd][0]);
                 sampleFiles[cmd].RemoveAt(0);
-                matcher.Templates[cmd].RemoveAt(0);
+                matcher.RemoveOldest(cmd);
             }
             matcher.Recalibrate();
             UpdateSampleLabels();
@@ -821,7 +948,7 @@ namespace VTT
             if (MessageBox.Show(this, "Delete all " + cmd.ToUpperInvariant() + " samples?", AppInfo.Name, MessageBoxButtons.YesNo) != DialogResult.Yes) return;
             foreach (var f in sampleFiles[cmd]) TryDelete(f);
             sampleFiles[cmd].Clear();
-            matcher.Templates[cmd].Clear();
+            matcher.Clear(cmd);
             matcher.Recalibrate();
             UpdateSampleLabels();
             SetHint(cmd.ToUpperInvariant() + " samples deleted.");
@@ -851,8 +978,22 @@ namespace VTT
             settingsHint.Text = text;
         }
 
+        bool KeyIsDown { get { return live && !tentativeOff; } }
+
         void SetLive(bool on, string reason)
         {
+            abortTimer.Stop();
+            if (tentativeOff)
+            {
+                // An early cut is waiting: OFF confirms it (the key is already up), ON takes it back.
+                tentativeOff = false;
+                if (on) { KeySender.Send(heldKey, true); UpdateStatus(); return; }
+                live = false;
+                lastSpeech = DateTime.Now;
+                if (settings.Sounds) WavePlayer.Play(offTone, 22050, OutputIndex());
+                UpdateStatus();
+                return;
+            }
             if (on == live) return;
             live = on;
             KeySender.Send(heldKey, on);
@@ -875,7 +1016,7 @@ namespace VTT
             string status;
             if (recordTarget != null) { view.TargetColor = Theme.Record; status = "Recording " + recordTarget.ToUpperInvariant(); view.Glyph = Theme.GlyphMic; }
             else if (!listening) { view.TargetColor = Theme.Paused; status = "Paused"; view.Glyph = Theme.GlyphPause; }
-            else if (live) { view.TargetColor = Theme.Live; status = "Live"; view.Glyph = Theme.GlyphMic; }
+            else if (KeyIsDown) { view.TargetColor = Theme.Live; status = "Live"; view.Glyph = Theme.GlyphMic; }
             else { view.TargetColor = Theme.Off; status = "Mic off"; view.Glyph = Theme.GlyphMicOff; }
             view.Status = status;
             view.Paused = !listening;
